@@ -9,10 +9,22 @@ FROM python:3.12-slim
 # build-essential: fallback in case TgCrypto (a C extension) has no
 # prebuilt wheel for this exact platform/Python combo and needs to compile
 # from source — cheap to include, avoids an otherwise opaque build failure.
+# curl/unzip: needed to install Deno below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     build-essential \
+    curl \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# yt-dlp now needs to solve a YouTube signature/"n" JS challenge to resolve
+# most videos' actual stream URLs (confirmed live: without this, every
+# extraction fails with "Requested format is not available" even with valid
+# cookies) — it shells out to an external JS runtime to do that, which
+# doesn't ship with python:3.12-slim. Deno is yt-dlp's documented option for
+# this (see https://github.com/yt-dlp/yt-dlp/wiki/EJS).
+RUN curl -fsSL https://deno.land/install.sh | sh
+ENV PATH="/root/.deno/bin:${PATH}"
 
 WORKDIR /app
 

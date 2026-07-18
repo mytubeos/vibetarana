@@ -8,7 +8,7 @@ from pyrogram import idle
 
 from bot.core import db
 from bot.core.assistants import pool
-from bot.core.calls import register_all_handlers, setup_cookies
+from bot.core.calls import patch_ytdlp_timeout, register_all_handlers, setup_cookies
 from bot.core.client import bot
 from bot.utils.keepalive import start_keepalive_server
 from bot.utils.logger import get_logger
@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 
 async def main() -> None:
     setup_cookies()
+    patch_ytdlp_timeout()
 
     # Connect + prime the sudo cache before the bot starts dispatching
     # messages, so admin_filter never wrongly rejects an early sudo command.

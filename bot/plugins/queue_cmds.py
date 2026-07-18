@@ -9,6 +9,7 @@ from pyrogram.types import Message
 from bot.core import calls, db
 from bot.core.decorators import admin_filter
 from bot.core.queue import queues
+from bot.utils.formatting import format_seconds, parse_duration_to_seconds
 
 MAX_IMPORT_FILE_BYTES = 512 * 1024
 
@@ -20,16 +21,26 @@ async def queue_cmd(_: Client, message: Message) -> None:
         await message.reply_text("Queue is empty.")
         return
 
+    total_seconds = sum(parse_duration_to_seconds(t.duration) for t in state.queue)
+
     lines = [
-        f"Loop: {state.loop_mode} | Autoplay: {'on' if state.autoplay else 'off'}",
-        "",
-        f"Now playing: {state.current.title} ({state.current.duration})",
+        "📋 QUEUE",
+        "━━━━━━━━━━━━━━",
+        "▶️ Now Playing",
+        f"🎧 {state.current.title}",
+        f"⏱ {state.current.duration}  •  🙋 {state.current.requested_by_name}",
+        "━━━━━━━━━━━━━━",
+        f"⏳ Total Songs: {len(state.queue)}  •  🕒 Total Queue Time: {format_seconds(total_seconds)}",
+        f"🔁 Loop: {state.loop_mode}  •  🔀 Autoplay: {'on' if state.autoplay else 'off'}",
     ]
     upcoming = state.queue[1:21]
     if upcoming:
-        lines.append("")
-        lines.append("Up next:")
-        lines.extend(f"{i}. {track.title} ({track.duration})" for i, track in enumerate(upcoming, start=1))
+        lines.append("━━━━━━━━━━━━━━")
+        lines.append("📜 Up Next")
+        lines.extend(
+            f"{i}. {track.title}  ⏱ {track.duration}  •  🙋 {track.requested_by_name}"
+            for i, track in enumerate(upcoming, start=1)
+        )
     remaining = len(state.queue) - 1 - len(upcoming)
     if remaining > 0:
         lines.append(f"...and {remaining} more.")
@@ -42,7 +53,10 @@ async def queue_cmd(_: Client, message: Message) -> None:
 @Client.on_message(filters.command("loop") & filters.group & admin_filter)
 async def loop_cmd(_: Client, message: Message) -> None:
     if len(message.command) < 2 or message.command[1].lower() not in ("off", "one", "all"):
-        await message.reply_text("Usage: `/loop <off|one|all>`")
+        # parse_mode disabled: the <off|one|all> placeholder gets misread as
+        # an HTML tag by Pyrogram's combined Markdown+HTML parser, which
+        # corrupts the backtick-code entity and throws EntityBoundsInvalid.
+        await message.reply_text("Usage: /loop <off|one|all>", parse_mode=ParseMode.DISABLED)
         return
 
     mode = message.command[1].lower()
@@ -54,7 +68,7 @@ async def loop_cmd(_: Client, message: Message) -> None:
 @Client.on_message(filters.command("autoplay") & filters.group & admin_filter)
 async def autoplay_cmd(_: Client, message: Message) -> None:
     if len(message.command) < 2 or message.command[1].lower() not in ("on", "off"):
-        await message.reply_text("Usage: `/autoplay <on|off>`")
+        await message.reply_text("Usage: /autoplay <on|off>", parse_mode=ParseMode.DISABLED)
         return
 
     enabled = message.command[1].lower() == "on"

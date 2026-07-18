@@ -5,10 +5,16 @@ empty voice chat.
 from __future__ import annotations
 
 import asyncio
+import shlex
 from pathlib import Path
+from typing import Optional, Tuple
 
 from pytgcalls import filters as fl
+from pytgcalls.exceptions import YtDlpError
+from pytgcalls.ffmpeg import cleanup_commands
 from pytgcalls.types import ChatUpdate, MediaStream, StreamEnded
+from pytgcalls.types.raw.video_parameters import VideoParameters
+from pytgcalls.ytdlp import YtDlp
 
 from bot.core.assistants import Assistant, pool
 from bot.core.client import bot
@@ -51,14 +57,7 @@ def setup_cookies() -> None:
     cookies.txt if one is found or can be made — YouTube throttles/blocks
     datacenter IPs (VPS/PaaS hosts) without one (see README's "Known
     operational risks"). No-op if no cookies file exists anywhere, so
-    deploys that don't need it are unaffected.
-
-    Deliberately does NOT pin --extractor-args player_client=...: tried
-    forcing web+android to work around a "Requested format is not
-    available" error seen live, but a local test proved yt-dlp's own
-    default client selection already resolves that exact video fine — the
-    override didn't help and only risked picking a worse default. Left on
-    yt-dlp's default (no override) instead."""
+    deploys that don't need it are unaffected."""
     if not COOKIES_PATH.exists():
         if not RENDER_SECRET_COOKIES_PATH.exists():
             return
@@ -67,6 +66,66 @@ def setup_cookies() -> None:
         logger.info("Copied cookies.txt from Render's (read-only) Secret Files mount to a writable path")
     YTDLP_CONFIG_PATH.write_text(f"--cookies {COOKIES_PATH}\n")
     logger.info("yt-dlp cookies config written, using %s", COOKIES_PATH)
+
+
+# py-tgcalls hardcodes this at 20s (see its ytdlp.py), timing extraction from
+# webpage fetch through format resolution. That was fine when yt-dlp could
+# resolve a format list on its own; YouTube now additionally requires solving
+# a signature/"n" JS challenge (see README/main.py's Deno note), which alone
+# measured ~17s live even warm-cached — 20s total is too tight and intermittently
+# times out. No public knob for this, so the whole function is copied from
+# py-tgcalls' own source with only the timeout number changed.
+YTDLP_SUBPROCESS_TIMEOUT_SECONDS = 60
+
+
+def patch_ytdlp_timeout() -> None:
+    """Call once at startup, after setup_cookies(). Replaces YtDlp.extract
+    with a copy of itself that waits YTDLP_SUBPROCESS_TIMEOUT_SECONDS instead
+    of py-tgcalls' hardcoded 20."""
+
+    async def patched_extract(
+        link: Optional[str],
+        video_parameters: VideoParameters,
+        add_commands: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if link is None:
+            return None, None
+        commands = [
+            "yt-dlp",
+            "-g",
+            "-f",
+            'bestvideo[vcodec~="(vp09|avc1)"]+m4a/best',
+            "-S",
+            f"res:{min(video_parameters.width, video_parameters.height)}",
+            "--no-warnings",
+        ]
+        if add_commands:
+            commands += await cleanup_commands(
+                shlex.split(add_commands), "yt-dlp", ["-f", "-g", "--no-warnings"]
+            )
+        commands.append(link)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *commands, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), YTDLP_SUBPROCESS_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                proc.terminate()
+                raise YtDlpError("yt-dlp process timeout")
+            if stderr:
+                raise YtDlpError(stderr.decode())
+            data = stdout.decode().strip().split("\n")
+            if data:
+                return data[0], data[1] if len(data) >= 2 else data[0]
+            raise YtDlpError("No video URLs found")
+        except FileNotFoundError:
+            raise YtDlpError("yt-dlp is not installed on your system")
+
+    YtDlp.extract = staticmethod(patched_extract)
+    logger.info("Patched py-tgcalls' yt-dlp subprocess timeout to %ds", YTDLP_SUBPROCESS_TIMEOUT_SECONDS)
 
 
 def _cancel_pending_leave(chat_id: int) -> None:

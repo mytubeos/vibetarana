@@ -4,23 +4,33 @@ Both share _resolve_and_queue(); the only difference is the `video` flag set
 on the resolved Track before it's queued (bot/core/calls.py reads that flag
 per-track when it actually starts the stream)."""
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.types import Message
 
 from bot.core import calls
 from bot.core.decorators import admin_filter
 from bot.core.queue import queues
 from bot.platforms import resolve
+from bot.utils.formatting import track_block
 
 
 async def _resolve_and_queue(message: Message, *, video: bool) -> None:
     command_name = "vplay" if video else "play"
     if len(message.command) < 2:
-        await message.reply_text(f"Usage: `/{command_name} <song name, YouTube/Spotify/Apple Music/SoundCloud link>`")
+        # parse_mode disabled: the <song name, ...> placeholder gets misread
+        # as an HTML tag by Pyrogram's combined Markdown+HTML parser, which
+        # corrupts the backtick-code entity and throws EntityBoundsInvalid.
+        await message.reply_text(
+            f"Usage: /{command_name} <song name, YouTube/Spotify/Apple Music/SoundCloud link>",
+            parse_mode=ParseMode.DISABLED,
+        )
         return
 
     query = message.text.split(None, 1)[1]
     chat_id = message.chat.id
-    status = await message.reply_text(f"Searching for `{query}`...")
+    # query is arbitrary user input — could itself contain backticks/`<>`,
+    # so it goes in unparsed rather than risk the same entity error.
+    status = await message.reply_text(f"Searching for {query}...", parse_mode=ParseMode.DISABLED)
 
     track = await resolve(
         query,
@@ -36,7 +46,7 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
     position = queues.add(chat_id, track)
 
     if not was_idle:
-        await status.edit_text(f"Added to queue at position {position}: **{track.title}** ({track.duration})")
+        await status.edit_text(track_block(track, heading=f"➕ ADDED TO QUEUE — #{position}"))
         return
 
     assistant = await calls.join_and_play(chat_id, track)
@@ -52,8 +62,8 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
         )
         return
 
-    prefix = "🎥" if video else "▶️"
-    await status.edit_text(f"{prefix} Now playing: **{track.title}** ({track.duration})")
+    prefix = "🎥" if video else "🎵"
+    await status.edit_text(track_block(track, heading=f"{prefix} NOW PLAYING", footer="▶️ Playing"))
 
 
 @Client.on_message(filters.command("play") & filters.group & admin_filter)

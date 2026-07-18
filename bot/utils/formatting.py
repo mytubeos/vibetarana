@@ -1,6 +1,8 @@
 """Small shared display-formatting helpers."""
 from __future__ import annotations
 
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from bot.core.queue import Track
 
 
@@ -62,3 +64,22 @@ def format_seconds(total_seconds: int) -> str:
     if minutes:
         return f"{minutes}m {seconds}s"
     return f"{seconds}s"
+
+
+def playback_keyboard(*, paused: bool) -> InlineKeyboardMarkup:
+    """Inline buttons attached to "now playing" messages — pause/resume,
+    skip, stop without typing a command. bot/plugins/controls.py's
+    playback_callback() handles the button presses; `paused` picks which of
+    pause/resume to show since they're mutually exclusive states."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "▶️ Resume" if paused else "⏸ Pause",
+                    callback_data="vt:resume" if paused else "vt:pause",
+                ),
+                InlineKeyboardButton("⏭ Skip", callback_data="vt:skip"),
+            ],
+            [InlineKeyboardButton("⏹ Stop", callback_data="vt:stop")],
+        ]
+    )

@@ -14,6 +14,7 @@ from pytgcalls.exceptions import YtDlpError
 from pytgcalls.ffmpeg import cleanup_commands
 from pytgcalls.types import ChatUpdate, MediaStream, StreamEnded
 from pytgcalls.types.raw.video_parameters import VideoParameters
+from pytgcalls.types.stream.video_quality import VideoQuality
 from pytgcalls.ytdlp import YtDlp
 
 from bot.core.assistants import Assistant, pool
@@ -50,6 +51,23 @@ RENDER_SECRET_COOKIES_PATH = Path("/etc/secrets/cookies.txt")
 YTDLP_CONFIG_PATH = Path("yt-dlp.conf")
 
 _pending_leave_tasks: dict[int, asyncio.Task] = {}
+
+# Resolving a track's stream URL(s) takes ~15-20s now (see
+# patch_ytdlp_timeout's comment) — most of that is unavoidable YouTube-side,
+# but for the *next* queued track we already know is coming, there's no
+# reason to pay it again right at skip/auto-advance time. schedule_prefetch()
+# resolves it in the background while the current track plays; _play_track()
+# uses the cached URLs instead of re-resolving if they're ready in time.
+# Keyed by id(track) — a track's own object identity is a fine cache key
+# for its short lifetime in one chat's queue, and entries are popped as soon
+# as they're consumed (or the resolve fails), so nothing lingers.
+_prefetch_cache: dict[int, tuple[str, str]] = {}
+_prefetch_tasks: dict[int, asyncio.Task] = {}
+
+# Matches MediaStream's own default (VideoQuality.HD_720p, adjust_by_height=
+# False) — schedule_prefetch() has no MediaStream instance yet to read this
+# off of, since resolving is the whole point of building one.
+_DEFAULT_VIDEO_PARAMETERS = VideoParameters(*VideoQuality.HD_720p.value, adjust_by_height=False)
 
 
 def setup_cookies() -> None:
@@ -167,20 +185,55 @@ def _get_healthy_assistant(chat_id: int) -> Assistant | None:
     return assistant
 
 
+def schedule_prefetch(chat_id: int) -> None:
+    """Kick off a background resolve of the queue's next track (index 1 —
+    index 0 is whatever's currently playing), if one exists and isn't
+    already cached/in flight. Call after anything that could change what
+    "next" is: a track starts playing, a new one is added to a queue that's
+    already playing, etc. Safe to call speculatively — cheap no-op if
+    there's nothing to prefetch or it's already covered."""
+    state = queues.get(chat_id)
+    if len(state.queue) < 2:
+        return
+    next_track = state.queue[1]
+    key = id(next_track)
+    if key in _prefetch_cache or key in _prefetch_tasks:
+        return
+
+    async def _prefetch() -> None:
+        try:
+            urls = await YtDlp.extract(next_track.link, _DEFAULT_VIDEO_PARAMETERS, None)
+        except Exception:
+            logger.warning("Prefetch failed for %r", next_track.title, exc_info=True)
+        else:
+            _prefetch_cache[key] = urls
+        finally:
+            _prefetch_tasks.pop(key, None)
+
+    _prefetch_tasks[key] = asyncio.create_task(_prefetch())
+
+
 async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
     """Returns True if playback started. False on any yt-dlp/ffmpeg failure
     (deleted video, region-blocked, unsupported format, network issue) —
     never raises, so callers can react (try the next track, report an
     error) instead of leaving the chat silently wedged."""
+    cached = _prefetch_cache.pop(id(track), None)
     try:
-        await assistant.call_py.play(
-            chat_id,
-            MediaStream(track.link, video_flags=_video_flags(track)),
-        )
+        if cached is not None:
+            # Already a googlevideo.com URL, not a youtube.com one — pytgcalls'
+            # own is_valid() check (see ytdlp.py) fails on it, so check_stream()
+            # skips straight past re-extracting and uses it as-is.
+            video_url, audio_url = cached
+            stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track))
+        else:
+            stream = MediaStream(track.link, video_flags=_video_flags(track))
+        await assistant.call_py.play(chat_id, stream)
     except Exception:
         logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
         return False
     queues.get(chat_id).is_paused = False
+    schedule_prefetch(chat_id)
     return True
 
 

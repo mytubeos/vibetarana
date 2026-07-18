@@ -11,7 +11,7 @@ from bot.core import calls
 from bot.core.decorators import admin_filter
 from bot.core.queue import queues
 from bot.platforms import resolve
-from bot.utils.formatting import track_block
+from bot.utils.formatting import playback_keyboard, track_block
 
 
 async def _resolve_and_queue(message: Message, *, video: bool) -> None:
@@ -47,6 +47,7 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
 
     if not was_idle:
         await status.edit_text(track_block(track, heading=f"➕ ADDED TO QUEUE — #{position}"))
+        calls.schedule_prefetch(chat_id)
         return
 
     assistant = await calls.join_and_play(chat_id, track)
@@ -63,7 +64,10 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
         return
 
     prefix = "🎥" if video else "🎵"
-    await status.edit_text(track_block(track, heading=f"{prefix} NOW PLAYING", footer="▶️ Playing"))
+    await status.edit_text(
+        track_block(track, heading=f"{prefix} NOW PLAYING", footer="▶️ Playing"),
+        reply_markup=playback_keyboard(paused=False),
+    )
 
 
 @Client.on_message(filters.command("play") & filters.group & admin_filter)

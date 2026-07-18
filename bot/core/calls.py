@@ -5,6 +5,7 @@ empty voice chat.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from pytgcalls import filters as fl
 from pytgcalls.types import ChatUpdate, MediaStream, StreamEnded
@@ -20,7 +21,17 @@ logger = get_logger(__name__)
 AUTO_LEAVE_GRACE_SECONDS = 75
 MAX_CONSECUTIVE_PLAY_FAILURES = 3
 
+COOKIES_PATH = Path("cookies/cookies.txt")
+
 _pending_leave_tasks: dict[int, asyncio.Task] = {}
+
+
+def _ytdlp_parameters() -> str | None:
+    """--cookies flag for yt-dlp if cookies.txt is present — YouTube throttles/
+    blocks datacenter IPs (VPS/PaaS hosts) without one (see README's "Known
+    operational risks"). None when absent, so behavior is unchanged for
+    deploys that don't need it."""
+    return f"--cookies {COOKIES_PATH}" if COOKIES_PATH.exists() else None
 
 
 def _cancel_pending_leave(chat_id: int) -> None:
@@ -70,7 +81,7 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
     try:
         await assistant.call_py.play(
             chat_id,
-            MediaStream(track.link, video_flags=_video_flags(track)),
+            MediaStream(track.link, video_flags=_video_flags(track), ytdlp_parameters=_ytdlp_parameters()),
         )
     except Exception:
         logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
@@ -226,7 +237,12 @@ async def seek(chat_id: int, seconds: int) -> bool:
     try:
         await assistant.call_py.play(
             chat_id,
-            MediaStream(track.link, ffmpeg_parameters=f"-ss {seconds}", video_flags=_video_flags(track)),
+            MediaStream(
+                track.link,
+                ffmpeg_parameters=f"-ss {seconds}",
+                video_flags=_video_flags(track),
+                ytdlp_parameters=_ytdlp_parameters(),
+            ),
         )
     except Exception:
         logger.warning("seek failed for chat %d", chat_id, exc_info=True)

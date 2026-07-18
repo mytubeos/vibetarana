@@ -123,6 +123,22 @@ sudo systemctl enable --now musicbot
 journalctl -u musicbot -f   # view logs
 ```
 
+### Deploying on Render
+
+Render's containers run Linux (satisfies py-tgcalls' requirement) and
+`Dockerfile`/`render.yaml` in this repo are set up for it, but **the free
+tier won't stay up 24/7** — a Telegram bot needs Render's "Background
+Worker" service type (not "Web Service," which expects an HTTP port and
+sleeps after 15 min idle either way), and Background Workers start at the
+paid **Starter plan (~$7/month)**. There's no way around that on Render
+specifically; a similarly-priced VPS is the alternative (see above).
+
+1. Push this repo to GitHub (already done if you're reading this from there).
+2. On [Render's dashboard](https://dashboard.render.com), **New → Blueprint**, connect this repo — it'll read `render.yaml` automatically and create a Background Worker using `Dockerfile`.
+3. Render will prompt you to fill in every env var from `.env.example` (all marked `sync: false` in `render.yaml` — nothing secret is stored in the repo itself).
+4. Deploy. Watch the logs tab — a misconfigured `.env` fails the same way it does locally (one line per bad field), so a bad deploy is easy to diagnose.
+5. **Optional**: Render's filesystem is ephemeral by default, so `cookies/cookies.txt` (see "Known operational risks" below) won't survive a redeploy unless you attach a [persistent disk](https://render.com/docs/disks) mounted at `/app/cookies`.
+
 ## Known operational risks
 
 - **YouTube cookies**: YouTube throttles datacenter IPs, which is what every VPS is. If playback works locally but fails on the VPS, this is the most likely cause — export a `cookies.txt` from a logged-in browser session into `cookies/`.

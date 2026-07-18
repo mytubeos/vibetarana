@@ -1,0 +1,14 @@
+.venv/
+venv/
+.git/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+tests/
+*.session
+*.session-journal
+cookies/*
+!cookies/.gitkeep
+downloads/*
+!downloads/.gitkeep

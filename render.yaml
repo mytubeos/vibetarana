@@ -1,0 +1,47 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# `type: worker` (not `web`): this is a Telegram bot, not an HTTP server —
+# it doesn't listen on a port, so it must NOT be deployed as a Web Service
+# (Render would think it's unhealthy for never responding to a port check,
+# and the free Web Service tier spins down after 15 min idle anyway, which
+# would kill an always-connected voice-chat bot). Background Workers start
+# at the paid Starter plan — there's no free tier that stays up 24/7.
+#
+# `env: docker`: uses ./Dockerfile (installs ffmpeg, which Render's native
+# Python runtime doesn't ship, but py-tgcalls needs for every stream).
+#
+# Every envVar below is `sync: false` — Render will prompt you to fill each
+# one in manually from its dashboard after connecting this repo. Nothing
+# secret is stored in this file or the repo (see .env.example for what each
+# one is and where to get it).
+services:
+  - type: worker
+    name: vibetarana-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: OWNER_ID
+        sync: false
+      - key: ASSISTANT_SESSIONS
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: LOG_GROUP_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_ID
+        sync: false
+      - key: SPOTIFY_CLIENT_SECRET
+        sync: false
+      - key: DURATION_LIMIT_MIN
+        value: "60"
+      - key: MAX_VC_PER_ASSISTANT
+        value: "1"
+      - key: DEFAULT_LANG
+        value: "en"

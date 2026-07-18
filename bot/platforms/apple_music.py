@@ -12,6 +12,7 @@ found", since there's no single track to queue.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 import aiohttp
@@ -52,7 +53,10 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
                 # even though the body is valid JSON (confirmed against the
                 # live API).
                 data = await resp.json(content_type=None)
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        # asyncio.TimeoutError isn't an aiohttp.ClientError subclass (verified
+        # against the installed aiohttp) — a session-level total-timeout
+        # raises it directly, so it needs its own catch here too.
         logger.warning("Apple Music lookup request failed", exc_info=True)
         return None
 

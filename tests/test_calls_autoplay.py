@@ -19,7 +19,7 @@ def make_track(title: str = "seed") -> Track:
 
 
 class _FakeAssistant:
-    pass
+    healthy = True
 
 
 @pytest.fixture
@@ -34,6 +34,7 @@ def _patch_play_and_send(monkeypatch):
 
     async def fake_play_track(assistant, chat_id, track):
         play_calls.append((assistant, chat_id, track))
+        return True  # _play_track's real contract: True on successful start
 
     async def fake_send_message(*args, **kwargs):
         pass

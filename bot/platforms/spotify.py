@@ -13,6 +13,7 @@ is optional, not required to run the bot.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 
@@ -63,7 +64,11 @@ async def _get_access_token() -> str | None:
                     logger.warning("Spotify token request failed with status %d", resp.status)
                     return None
                 data = await resp.json(content_type=None)
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        # asyncio.TimeoutError isn't an aiohttp.ClientError subclass (verified
+        # against the installed aiohttp) — a session-level total-timeout raises
+        # it directly, so it needs its own catch or a slow Spotify response
+        # would propagate uncaught out of this "never raises" resolver.
         logger.warning("Spotify token request failed", exc_info=True)
         return None
 
@@ -95,7 +100,7 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
                     logger.warning("Spotify track lookup failed with status %d", resp.status)
                     return None
                 data = await resp.json(content_type=None)
-    except aiohttp.ClientError:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         logger.warning("Spotify track lookup request failed", exc_info=True)
         return None
 

@@ -18,6 +18,7 @@ from bot.utils.logger import get_logger
 logger = get_logger(__name__)
 
 AUTO_LEAVE_GRACE_SECONDS = 75
+MAX_CONSECUTIVE_PLAY_FAILURES = 3
 
 _pending_leave_tasks: dict[int, asyncio.Task] = {}
 
@@ -47,12 +48,35 @@ def _video_flags(track: Track) -> MediaStream.Flags:
     return MediaStream.Flags.AUTO_DETECT if track.video else MediaStream.Flags.IGNORE
 
 
-async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> None:
-    await assistant.call_py.play(
-        chat_id,
-        MediaStream(track.link, video_flags=_video_flags(track)),
-    )
+def _get_healthy_assistant(chat_id: int) -> Assistant | None:
+    """Like pool.get_assigned(), but treats an unhealthy assistant (flagged
+    by health_check_loop) as if none were assigned. Use this before actively
+    trying to DO something with the assistant (play/pause/resume/seek) —
+    routing a command through a connection already known to be dead just
+    trades one silent failure for another. Cleanup paths (stop(), the
+    kicked/left-group handler) deliberately use pool.get_assigned() directly
+    instead, since they need to release the pool slot regardless of health."""
+    assistant = pool.get_assigned(chat_id)
+    if assistant is not None and not assistant.healthy:
+        return None
+    return assistant
+
+
+async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
+    """Returns True if playback started. False on any yt-dlp/ffmpeg failure
+    (deleted video, region-blocked, unsupported format, network issue) —
+    never raises, so callers can react (try the next track, report an
+    error) instead of leaving the chat silently wedged."""
+    try:
+        await assistant.call_py.play(
+            chat_id,
+            MediaStream(track.link, video_flags=_video_flags(track)),
+        )
+    except Exception:
+        logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
+        return False
     queues.get(chat_id).is_paused = False
+    return True
 
 
 async def _try_autoplay(chat_id: int) -> bool:
@@ -62,7 +86,7 @@ async def _try_autoplay(chat_id: int) -> bool:
     state = queues.get(chat_id)
     if not state.autoplay or state.last_track is None:
         return False
-    assistant = pool.get_assigned(chat_id)
+    assistant = _get_healthy_assistant(chat_id)
     if assistant is None:
         return False
     related = await youtube.get_related(state.last_track.link)
@@ -76,7 +100,9 @@ async def _try_autoplay(chat_id: int) -> bool:
     if pool.get_assigned(chat_id) is not assistant or queues.get(chat_id) is not state:
         return False
     queues.add(chat_id, related)
-    await _play_track(assistant, chat_id, related)
+    if not await _play_track(assistant, chat_id, related):
+        queues.advance(chat_id, force=True)  # pop the broken pick back out
+        return False
     try:
         await bot.send_message(chat_id, f"🔁 Autoplay: **{related.title}** ({related.duration})")
     except Exception:
@@ -87,15 +113,36 @@ async def _try_autoplay(chat_id: int) -> bool:
 async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
     """Shared by the stream-end handler (force=False — natural end-of-track,
     loop_mode="one" replays) and manual /skip (force=True — always moves on,
-    otherwise loop_mode="one" would make /skip a permanent no-op), then
-    either plays the next one, autoplays a related track, or starts the
-    auto-leave timer."""
+    otherwise loop_mode="one" would make /skip a permanent no-op).
+
+    Plays the next track; if it fails to start (broken link), tries up to
+    MAX_CONSECUTIVE_PLAY_FAILURES more before giving up, so one dead link
+    mid-queue doesn't wedge the chat — then autoplays a related track or
+    starts the auto-leave timer."""
     next_track = queues.advance(chat_id, force=force)
-    if next_track is not None:
-        assistant = pool.get_assigned(chat_id)
-        if assistant is not None:
-            await _play_track(assistant, chat_id, next_track)
-        return
+    attempts = 0
+    while next_track is not None:
+        assistant = _get_healthy_assistant(chat_id)
+        if assistant is None:
+            return
+        if await _play_track(assistant, chat_id, next_track):
+            return
+        attempts += 1
+        if attempts >= MAX_CONSECUTIVE_PLAY_FAILURES:
+            # Clear rather than leave the next untried track sitting as
+            # "current" — nothing is actually playing at this point, and a
+            # queue whose `current` track isn't really streaming would
+            # confuse both /queue and the auto-leave check below (which
+            # treats a non-empty queue as "still busy").
+            queues.clear(chat_id)
+            try:
+                await bot.send_message(
+                    chat_id, "⚠️ Several tracks in a row failed to play — clearing the queue. Try /play again."
+                )
+            except Exception:
+                logger.warning("Failed to send playback-failure notice in %d", chat_id, exc_info=True)
+            break
+        next_track = queues.advance(chat_id, force=True)
 
     if await _try_autoplay(chat_id):
         return
@@ -104,30 +151,41 @@ async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
 
 async def join_and_play(chat_id: int, track: Track) -> Assistant | None:
     """Add-and-play entry point used by /play (and /import when idle).
-    Returns the assistant that took the chat, or None if every assistant is
-    at capacity."""
+    Returns the assistant if playback actually started, or None if every
+    assistant was at capacity OR the track failed to play (pool slot is
+    released either way, so a retry can get a fresh assignment)."""
     assistant = await pool.get_or_assign(chat_id)
     if assistant is None:
         return None
     _cancel_pending_leave(chat_id)
-    await _play_track(assistant, chat_id, track)
+    if not await _play_track(assistant, chat_id, track):
+        pool.release(chat_id)
+        return None
     return assistant
 
 
 async def pause(chat_id: int) -> bool:
-    assistant = pool.get_assigned(chat_id)
+    assistant = _get_healthy_assistant(chat_id)
     if assistant is None:
         return False
-    await assistant.call_py.pause(chat_id)
+    try:
+        await assistant.call_py.pause(chat_id)
+    except Exception:
+        logger.warning("pause failed for chat %d", chat_id, exc_info=True)
+        return False
     queues.get(chat_id).is_paused = True
     return True
 
 
 async def resume(chat_id: int) -> bool:
-    assistant = pool.get_assigned(chat_id)
+    assistant = _get_healthy_assistant(chat_id)
     if assistant is None:
         return False
-    await assistant.call_py.resume(chat_id)
+    try:
+        await assistant.call_py.resume(chat_id)
+    except Exception:
+        logger.warning("resume failed for chat %d", chat_id, exc_info=True)
+        return False
     queues.get(chat_id).is_paused = False
     return True
 
@@ -161,14 +219,18 @@ async def seek(chat_id: int, seconds: int) -> bool:
     — restarts decode at a fast input-side ffmpeg seek (`-ss`, placed before
     `-i`), and re-calling .play() on a chat already in-call hot-swaps the
     stream in place rather than leaving/rejoining."""
-    assistant = pool.get_assigned(chat_id)
+    assistant = _get_healthy_assistant(chat_id)
     track = queues.get(chat_id).current
     if assistant is None or track is None:
         return False
-    await assistant.call_py.play(
-        chat_id,
-        MediaStream(track.link, ffmpeg_parameters=f"-ss {seconds}", video_flags=_video_flags(track)),
-    )
+    try:
+        await assistant.call_py.play(
+            chat_id,
+            MediaStream(track.link, ffmpeg_parameters=f"-ss {seconds}", video_flags=_video_flags(track)),
+        )
+    except Exception:
+        logger.warning("seek failed for chat %d", chat_id, exc_info=True)
+        return False
     queues.get(chat_id).is_paused = False
     return True
 

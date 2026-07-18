@@ -20,26 +20,34 @@ async def main() -> None:
     # Connect + prime the sudo cache before the bot starts dispatching
     # messages, so admin_filter never wrongly rejects an early sudo command.
     await db.connect()
+    try:
+        await bot.start()
+        try:
+            me = await bot.get_me()
+            logger.info("Bot started as @%s", me.username)
 
-    await bot.start()
-    me = await bot.get_me()
-    logger.info("Bot started as @%s", me.username)
+            await pool.start()
+            try:
+                register_all_handlers()
+                asyncio.create_task(pool.health_check_loop())
 
-    await pool.start()
-    register_all_handlers()
-    asyncio.create_task(pool.health_check_loop())
-
-    logger.info(
-        "Ready — %d assistant(s) online, %d chat(s) each",
-        len(pool.assistants),
-        settings.max_vc_per_assistant,
-    )
-    await idle()
-
-    logger.info("Shutting down...")
-    await pool.stop()
-    await bot.stop()
-    await db.disconnect()
+                logger.info(
+                    "Ready — %d assistant(s) online, %d chat(s) each",
+                    len(pool.assistants),
+                    settings.max_vc_per_assistant,
+                )
+                await idle()
+            finally:
+                logger.info("Shutting down...")
+                await pool.stop()
+        finally:
+            await bot.stop()
+    finally:
+        # Nested try/finally so a failure at any stage (bad bot token, every
+        # assistant session invalid, idle() itself erroring) still cleanly
+        # releases whatever was already acquired, instead of leaving a
+        # dangling Pyrogram session or an idle Mongo connection open.
+        await db.disconnect()
 
 
 if __name__ == "__main__":

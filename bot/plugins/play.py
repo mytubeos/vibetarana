@@ -42,9 +42,13 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
     assistant = await calls.join_and_play(chat_id, track)
     if assistant is None:
         queues.clear(chat_id)
+        # join_and_play() returns None for two different reasons — every
+        # assistant busy, or the track itself failed to play (deleted/
+        # region-blocked/unsupported) — it doesn't distinguish, so this
+        # message has to stay accurate for both.
         await status.edit_text(
-            "All assistants are busy right now — try again in a bit, or ask "
-            "the bot owner to add another assistant account."
+            "Couldn't start playback — either all assistants are busy right now, "
+            "or that track failed to load. Try again in a bit or pick a different track."
         )
         return
 

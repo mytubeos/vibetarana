@@ -24,6 +24,8 @@ HELP_TEXT = (
     "**Queue**\n"
     "/queue — show what's playing and queued\n"
     "/loop <off|one|all> — set repeat mode\n"
+    "/autoplay <on|off> — when the queue empties, keep playing YouTube-related "
+    "tracks instead of leaving\n"
     "/shuffle — randomize the upcoming tracks\n"
     "/export — download the current queue as a .json file\n"
     "/import — reply to a .json queue file to add its tracks\n\n"

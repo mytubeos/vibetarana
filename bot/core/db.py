@@ -65,7 +65,7 @@ async def remove_sudo(user_id: int) -> bool:
     return result.deleted_count > 0
 
 
-DEFAULT_CHAT_SETTINGS = {"loop_mode": "off"}
+DEFAULT_CHAT_SETTINGS = {"loop_mode": "off", "autoplay": False}
 
 
 async def get_chat_settings(chat_id: int) -> dict:

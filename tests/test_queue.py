@@ -20,6 +20,15 @@ def track_payload(title: str, link: str = "https://youtube.com/watch?v=abc123456
     }
 
 
+# --- state defaults ---------------------------------------------------------
+
+def test_new_chat_state_defaults():
+    qm = QueueManager()
+    state = qm.get(1)
+    assert state.autoplay is False
+    assert state.last_track is None
+
+
 # --- advance() / loop_mode -------------------------------------------------
 
 def test_advance_loop_off_drops_finished_track():
@@ -29,6 +38,30 @@ def test_advance_loop_off_drops_finished_track():
     qm.add(1, b)
     assert qm.advance(1) is b
     assert qm.get(1).queue == [b]
+
+
+def test_advance_records_last_track_for_autoplay():
+    qm = QueueManager()
+    a, b = make_track("a"), make_track("b")
+    qm.add(1, a)
+    qm.add(1, b)
+    qm.advance(1)  # a finishes, b becomes current
+    assert qm.get(1).last_track is a
+    qm.advance(1)  # b finishes, queue now empty
+    assert qm.get(1).last_track is b
+    assert qm.get(1).current is None
+
+
+def test_advance_does_not_record_last_track_under_loop_one_replay():
+    # Non-forced advance under loop="one" doesn't pop anything, so nothing
+    # "finished" — last_track should stay whatever it was before.
+    qm = QueueManager()
+    a = make_track("a")
+    qm.add(1, a)
+    qm.get(1).loop_mode = "one"
+    assert qm.get(1).last_track is None
+    qm.advance(1)
+    assert qm.get(1).last_track is None
 
 
 def test_advance_loop_one_replays_same_track():

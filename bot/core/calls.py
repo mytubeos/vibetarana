@@ -10,7 +10,9 @@ from pytgcalls import filters as fl
 from pytgcalls.types import ChatUpdate, MediaStream, StreamEnded
 
 from bot.core.assistants import Assistant, pool
+from bot.core.client import bot
 from bot.core.queue import Track, queues
+from bot.platforms import youtube
 from bot.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -53,19 +55,51 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> None:
     queues.get(chat_id).is_paused = False
 
 
+async def _try_autoplay(chat_id: int) -> bool:
+    """Called only when the queue just went empty. If /autoplay is on for
+    this chat, look up a YouTube-related track to the last one played and
+    start it instead of leaving. Returns True if it started something."""
+    state = queues.get(chat_id)
+    if not state.autoplay or state.last_track is None:
+        return False
+    assistant = pool.get_assigned(chat_id)
+    if assistant is None:
+        return False
+    related = await youtube.get_related(state.last_track.link)
+    if related is None:
+        return False
+    # Re-check after the network round-trip above: a concurrent /stop (or
+    # /play racing in with its own new track) could have released this chat
+    # or replaced its queue state while we were awaiting get_related(). Don't
+    # resurrect playback the user already told the bot to stop, and don't
+    # stomp a track a fresh /play just started.
+    if pool.get_assigned(chat_id) is not assistant or queues.get(chat_id) is not state:
+        return False
+    queues.add(chat_id, related)
+    await _play_track(assistant, chat_id, related)
+    try:
+        await bot.send_message(chat_id, f"🔁 Autoplay: **{related.title}** ({related.duration})")
+    except Exception:
+        logger.warning("Failed to send autoplay announcement in %d", chat_id, exc_info=True)
+    return True
+
+
 async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
     """Shared by the stream-end handler (force=False — natural end-of-track,
     loop_mode="one" replays) and manual /skip (force=True — always moves on,
     otherwise loop_mode="one" would make /skip a permanent no-op), then
-    either plays the next one or starts the auto-leave timer."""
+    either plays the next one, autoplays a related track, or starts the
+    auto-leave timer."""
     next_track = queues.advance(chat_id, force=force)
-    if next_track is None:
-        await _schedule_auto_leave(chat_id)
+    if next_track is not None:
+        assistant = pool.get_assigned(chat_id)
+        if assistant is not None:
+            await _play_track(assistant, chat_id, next_track)
         return
-    assistant = pool.get_assigned(chat_id)
-    if assistant is None:
+
+    if await _try_autoplay(chat_id):
         return
-    await _play_track(assistant, chat_id, next_track)
+    await _schedule_auto_leave(chat_id)
 
 
 async def join_and_play(chat_id: int, track: Track) -> Assistant | None:

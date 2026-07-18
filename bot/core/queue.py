@@ -35,6 +35,11 @@ class ChatPlaybackState:
     queue: list[Track] = field(default_factory=list)
     is_paused: bool = False
     loop_mode: LoopMode = "off"
+    # /autoplay on|off — when the queue empties, play a YouTube-related track
+    # instead of starting the auto-leave timer. `last_track` is the seed used
+    # to find something related; set by advance() whenever a track finishes.
+    autoplay: bool = False
+    last_track: Track | None = None
 
     @property
     def current(self) -> Track | None:
@@ -91,6 +96,7 @@ class QueueManager:
             if state.loop_mode == "one" and not force:
                 return state.current
             finished = state.queue.pop(0)
+            state.last_track = finished
             if state.loop_mode == "all":
                 state.queue.append(finished)
         return state.current

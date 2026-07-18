@@ -1,4 +1,4 @@
-"""Queue commands: /queue /loop /shuffle /export /import."""
+"""Queue commands: /queue /loop /shuffle /export /import /autoplay."""
 import json
 from io import BytesIO
 
@@ -20,7 +20,11 @@ async def queue_cmd(_: Client, message: Message) -> None:
         await message.reply_text("Queue is empty.")
         return
 
-    lines = [f"Loop: {state.loop_mode}", "", f"Now playing: {state.current.title} ({state.current.duration})"]
+    lines = [
+        f"Loop: {state.loop_mode} | Autoplay: {'on' if state.autoplay else 'off'}",
+        "",
+        f"Now playing: {state.current.title} ({state.current.duration})",
+    ]
     upcoming = state.queue[1:21]
     if upcoming:
         lines.append("")
@@ -45,6 +49,25 @@ async def loop_cmd(_: Client, message: Message) -> None:
     queues.get(message.chat.id).loop_mode = mode
     await db.set_chat_setting(message.chat.id, loop_mode=mode)
     await message.reply_text(f"🔁 Loop mode set to `{mode}`.")
+
+
+@Client.on_message(filters.command("autoplay") & filters.group & admin_filter)
+async def autoplay_cmd(_: Client, message: Message) -> None:
+    if len(message.command) < 2 or message.command[1].lower() not in ("on", "off"):
+        await message.reply_text("Usage: `/autoplay <on|off>`")
+        return
+
+    enabled = message.command[1].lower() == "on"
+    queues.get(message.chat.id).autoplay = enabled
+    await db.set_chat_setting(message.chat.id, autoplay=enabled)
+    await message.reply_text(
+        f"🔁 Autoplay turned {'on' if enabled else 'off'} — "
+        + (
+            "when the queue empties, I'll keep playing related tracks instead of leaving."
+            if enabled
+            else "I'll leave the voice chat after the queue's been empty for a bit, like before."
+        )
+    )
 
 
 @Client.on_message(filters.command("shuffle") & filters.group & admin_filter)

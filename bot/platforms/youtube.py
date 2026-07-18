@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 
-from py_yt import Video, VideosSearch
+from py_yt import Recommendations, Video, VideosSearch
 
 from bot.core.queue import Track
 from bot.utils.formatting import format_ms
@@ -88,3 +88,32 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
         requested_by_name=requested_by_name,
         source="YouTube",
     )
+
+
+async def get_related(video_link: str) -> Track | None:
+    """Find a related video for /autoplay to queue when the chat's queue
+    empties. Best-effort like resolve() — never raises, returns None on any
+    failure or empty result. `Recommendations.getRelated()`'s items use the
+    same plain "M:SS" duration string as the VideosSearch path above (not
+    Video.get()'s nested-dict format), confirmed against the installed
+    py_yt source and a live call."""
+    try:
+        result = await Recommendations.getRelated(video_link, limit=10)
+    except Exception:
+        logger.warning("Related-videos lookup failed for %s", video_link, exc_info=True)
+        return None
+
+    for item in result.get("result") or []:
+        if item.get("type") != "video" or not item.get("id"):
+            continue
+        thumbnails = item.get("thumbnails") or []
+        return Track(
+            title=item.get("title") or "Unknown title",
+            duration=item.get("duration") or "Unknown",
+            link=f"https://www.youtube.com/watch?v={item['id']}",
+            thumbnail=thumbnails[-1]["url"] if thumbnails else None,
+            requested_by=0,
+            requested_by_name="Autoplay",
+            source="YouTube (Autoplay)",
+        )
+    return None

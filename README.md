@@ -51,12 +51,23 @@ risk already noted below, not a new one:
   so the filename is used as the title. Registered last in the resolver
   order on purpose — see the module docstring.
 
+**Built so far (Phase 2b-ii — autoplay):**
+- **`/autoplay <on|off>`** (per-chat, off by default) — when the queue empties
+  and this is on, `bot/core/calls.py` looks up a YouTube-related video to the
+  last track played (`bot/platforms/youtube.py`'s `get_related()`, via
+  `py_yt`'s `Recommendations.getRelated()`) and keeps playing instead of
+  starting the auto-leave timer, announcing what it picked in the chat. Only
+  seeds from YouTube-sourced links today (Spotify/Apple Music/SoundCloud
+  tracks resolve *to* a YouTube link already, so this still works for them
+  too — it just doesn't know their original source's own "radio" feature).
+
 **Not built yet (ask to add when ready):**
-- **Phase 2b-ii** — a Telegram-uploaded audio/video file replied to with
+- **Phase 2b-iii** — a Telegram-uploaded audio/video file replied to with
   `/play` (needs a download-then-stream step, unlike everything above which
   streams from a URL directly), lyrics lookup, custom now-playing
   thumbnails, gapless/pre-buffer polish, full restart-persistence of active
-  queue state.
+  queue state, an actually-wired-up `LOG_GROUP_ID` (currently a dead config
+  field, same as it was in `TG`).
 - **Phase 3** — light moderation (anti-spam/anti-raid), multi-language,
   stats, blacklist, broadcast.
 
@@ -96,9 +107,11 @@ python -m pytest
 ```
 
 Covers the pure-logic pieces (queue loop/shuffle/export/import edge cases,
-platform-registry dispatch ordering) — no Telegram/Mongo/network connection
-needed. Anything that streams into a live voice chat still needs a real
-run on Linux/WSL2 (see above).
+platform-registry dispatch ordering, the autoplay race guard) — no real
+`.env`, Mongo, or network connection needed (`tests/conftest.py` sets
+harmless dummy config values, since a couple of modules need *some* config
+present at import time even for their pure logic). Anything that streams
+into a live voice chat still needs a real run on Linux/WSL2 (see above).
 
 ### Deploying on a VPS (systemd)
 

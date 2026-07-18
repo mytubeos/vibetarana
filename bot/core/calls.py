@@ -21,11 +21,18 @@ logger = get_logger(__name__)
 AUTO_LEAVE_GRACE_SECONDS = 75
 MAX_CONSECUTIVE_PLAY_FAILURES = 3
 
-# Checked in order: the VPS/systemd convention (relative to the working
-# directory) first, then Render's Secret Files location — Render's filename
-# field rejects slashes, so a Secret File named "cookies.txt" always lands at
-# /etc/secrets/cookies.txt regardless of service type.
-COOKIES_CANDIDATES = [Path("cookies/cookies.txt"), Path("/etc/secrets/cookies.txt")]
+# The VPS/systemd convention — relative to the working directory, and always
+# writable (the Dockerfile creates it: `RUN mkdir -p cookies downloads`).
+# yt-dlp must point --cookies at a writable path: it rewrites the cookie jar
+# on every run to persist rotated session cookies, and a read-only target
+# crashes the whole extraction (confirmed from a live log: `OSError: [Errno
+# 30] Read-only file system: '/etc/secrets/cookies.txt'`).
+COOKIES_PATH = Path("cookies/cookies.txt")
+
+# Render's Secret Files mount — filename field rejects slashes, so a Secret
+# File named "cookies.txt" always lands here. Read-only, so setup_cookies()
+# below copies it into COOKIES_PATH rather than pointing yt-dlp at it directly.
+RENDER_SECRET_COOKIES_PATH = Path("/etc/secrets/cookies.txt")
 
 # yt-dlp auto-loads this from its working directory (verified via `yt-dlp
 # --verbose`, which logs `Home config "yt-dlp.conf": [...]` for exactly this
@@ -40,15 +47,19 @@ _pending_leave_tasks: dict[int, asyncio.Task] = {}
 
 
 def setup_cookies() -> None:
-    """Call once at startup. Writes yt-dlp.conf pointing at cookies.txt if one
-    is found — YouTube throttles/blocks datacenter IPs (VPS/PaaS hosts)
-    without one (see README's "Known operational risks"). No-op if no
-    cookies file is found, so deploys that don't need it are unaffected."""
-    for path in COOKIES_CANDIDATES:
-        if path.exists():
-            YTDLP_CONFIG_PATH.write_text(f"--cookies {path}\n")
-            logger.info("yt-dlp cookies config written, using %s", path)
+    """Call once at startup. Writes yt-dlp.conf pointing at a writable
+    cookies.txt if one is found or can be made — YouTube throttles/blocks
+    datacenter IPs (VPS/PaaS hosts) without one (see README's "Known
+    operational risks"). No-op if no cookies file exists anywhere, so
+    deploys that don't need it are unaffected."""
+    if not COOKIES_PATH.exists():
+        if not RENDER_SECRET_COOKIES_PATH.exists():
             return
+        COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        COOKIES_PATH.write_bytes(RENDER_SECRET_COOKIES_PATH.read_bytes())
+        logger.info("Copied cookies.txt from Render's (read-only) Secret Files mount to a writable path")
+    YTDLP_CONFIG_PATH.write_text(f"--cookies {COOKIES_PATH}\n")
+    logger.info("yt-dlp cookies config written, using %s", COOKIES_PATH)
 
 
 def _cancel_pending_leave(chat_id: int) -> None:

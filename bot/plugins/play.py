@@ -50,6 +50,13 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
         calls.schedule_prefetch(chat_id)
         return
 
+    # This is the one case with no earlier warning that a wait is coming
+    # (queueing onto an active chat skips straight to "Added to Queue";
+    # skip/auto-advance likely already have this track prefetched) — resolving
+    # a fresh stream URL genuinely takes ~10-20s (see calls.py's
+    # patch_ytdlp_timeout), so say so here instead of leaving "Searching for
+    # ..." on screen with nothing happening, which reads as stuck/broken.
+    await status.edit_text(f"🔗 Loading stream for {track.title}... (up to 20s)", parse_mode=ParseMode.DISABLED)
     assistant = await calls.join_and_play(chat_id, track)
     if assistant is None:
         queues.clear(chat_id)

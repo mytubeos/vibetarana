@@ -27,18 +27,28 @@ MAX_CONSECUTIVE_PLAY_FAILURES = 3
 # /etc/secrets/cookies.txt regardless of service type.
 COOKIES_CANDIDATES = [Path("cookies/cookies.txt"), Path("/etc/secrets/cookies.txt")]
 
+# yt-dlp auto-loads this from its working directory (verified via `yt-dlp
+# --verbose`, which logs `Home config "yt-dlp.conf": [...]` for exactly this
+# file) with no extra flag needed. Deliberately NOT passed as
+# MediaStream(ytdlp_parameters=...): py-tgcalls' cleanup_commands() drops any
+# --long-form flag that has no single-dash alias in `yt-dlp -h full` output
+# before it ever reaches the yt-dlp subprocess, and --cookies has no such
+# alias — confirmed empirically, that flag was silently discarded every time.
+YTDLP_CONFIG_PATH = Path("yt-dlp.conf")
+
 _pending_leave_tasks: dict[int, asyncio.Task] = {}
 
 
-def _ytdlp_parameters() -> str | None:
-    """--cookies flag for yt-dlp if a cookies.txt is found — YouTube throttles/
-    blocks datacenter IPs (VPS/PaaS hosts) without one (see README's "Known
-    operational risks"). None if neither candidate exists, so behavior is
-    unchanged for deploys that don't need it."""
+def setup_cookies() -> None:
+    """Call once at startup. Writes yt-dlp.conf pointing at cookies.txt if one
+    is found — YouTube throttles/blocks datacenter IPs (VPS/PaaS hosts)
+    without one (see README's "Known operational risks"). No-op if no
+    cookies file is found, so deploys that don't need it are unaffected."""
     for path in COOKIES_CANDIDATES:
         if path.exists():
-            return f"--cookies {path}"
-    return None
+            YTDLP_CONFIG_PATH.write_text(f"--cookies {path}\n")
+            logger.info("yt-dlp cookies config written, using %s", path)
+            return
 
 
 def _cancel_pending_leave(chat_id: int) -> None:
@@ -88,7 +98,7 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
     try:
         await assistant.call_py.play(
             chat_id,
-            MediaStream(track.link, video_flags=_video_flags(track), ytdlp_parameters=_ytdlp_parameters()),
+            MediaStream(track.link, video_flags=_video_flags(track)),
         )
     except Exception:
         logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
@@ -244,12 +254,7 @@ async def seek(chat_id: int, seconds: int) -> bool:
     try:
         await assistant.call_py.play(
             chat_id,
-            MediaStream(
-                track.link,
-                ffmpeg_parameters=f"-ss {seconds}",
-                video_flags=_video_flags(track),
-                ytdlp_parameters=_ytdlp_parameters(),
-            ),
+            MediaStream(track.link, ffmpeg_parameters=f"-ss {seconds}", video_flags=_video_flags(track)),
         )
     except Exception:
         logger.warning("seek failed for chat %d", chat_id, exc_info=True)

@@ -8,7 +8,7 @@ from pyrogram import idle
 
 from bot.core import db
 from bot.core.assistants import pool
-from bot.core.calls import register_all_handlers
+from bot.core.calls import register_all_handlers, setup_cookies
 from bot.core.client import bot
 from bot.utils.keepalive import start_keepalive_server
 from bot.utils.logger import get_logger
@@ -18,6 +18,8 @@ logger = get_logger(__name__)
 
 
 async def main() -> None:
+    setup_cookies()
+
     # Connect + prime the sudo cache before the bot starts dispatching
     # messages, so admin_filter never wrongly rejects an early sudo command.
     # Bind the (Render-only) keep-alive port before anything slower, so a

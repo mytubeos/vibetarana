@@ -21,17 +21,24 @@ logger = get_logger(__name__)
 AUTO_LEAVE_GRACE_SECONDS = 75
 MAX_CONSECUTIVE_PLAY_FAILURES = 3
 
-COOKIES_PATH = Path("cookies/cookies.txt")
+# Checked in order: the VPS/systemd convention (relative to the working
+# directory) first, then Render's Secret Files location — Render's filename
+# field rejects slashes, so a Secret File named "cookies.txt" always lands at
+# /etc/secrets/cookies.txt regardless of service type.
+COOKIES_CANDIDATES = [Path("cookies/cookies.txt"), Path("/etc/secrets/cookies.txt")]
 
 _pending_leave_tasks: dict[int, asyncio.Task] = {}
 
 
 def _ytdlp_parameters() -> str | None:
-    """--cookies flag for yt-dlp if cookies.txt is present — YouTube throttles/
+    """--cookies flag for yt-dlp if a cookies.txt is found — YouTube throttles/
     blocks datacenter IPs (VPS/PaaS hosts) without one (see README's "Known
-    operational risks"). None when absent, so behavior is unchanged for
-    deploys that don't need it."""
-    return f"--cookies {COOKIES_PATH}" if COOKIES_PATH.exists() else None
+    operational risks"). None if neither candidate exists, so behavior is
+    unchanged for deploys that don't need it."""
+    for path in COOKIES_CANDIDATES:
+        if path.exists():
+            return f"--cookies {path}"
+    return None
 
 
 def _cancel_pending_leave(chat_id: int) -> None:

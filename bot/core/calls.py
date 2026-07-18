@@ -53,22 +53,19 @@ def setup_cookies() -> None:
     operational risks"). No-op if no cookies file exists anywhere, so
     deploys that don't need it are unaffected.
 
-    Also pins player_client=web,android: seen live, an authenticated
-    session can get an AV1-only format list for a given video, which
-    py-tgcalls' hardcoded `-f` filter (vp09/avc1 only — its own code, not
-    this repo's) then can't match at all ("Requested format is not
-    available"). Querying both clients widens the pool without touching
-    that filter — android's own formats are typically avc1."""
+    Deliberately does NOT pin --extractor-args player_client=...: tried
+    forcing web+android to work around a "Requested format is not
+    available" error seen live, but a local test proved yt-dlp's own
+    default client selection already resolves that exact video fine — the
+    override didn't help and only risked picking a worse default. Left on
+    yt-dlp's default (no override) instead."""
     if not COOKIES_PATH.exists():
         if not RENDER_SECRET_COOKIES_PATH.exists():
             return
         COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
         COOKIES_PATH.write_bytes(RENDER_SECRET_COOKIES_PATH.read_bytes())
         logger.info("Copied cookies.txt from Render's (read-only) Secret Files mount to a writable path")
-    YTDLP_CONFIG_PATH.write_text(
-        f"--cookies {COOKIES_PATH}\n"
-        "--extractor-args youtube:player_client=web,android\n"
-    )
+    YTDLP_CONFIG_PATH.write_text(f"--cookies {COOKIES_PATH}\n")
     logger.info("yt-dlp cookies config written, using %s", COOKIES_PATH)
 
 

@@ -1,0 +1,19 @@
+[Unit]
+Description=TG2 Telegram Voice-Chat Music Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace with the Linux user that owns the bot's files
+User=REPLACE_WITH_YOUR_USERNAME
+# Replace with the absolute path where you uploaded/cloned this project
+WorkingDirectory=/home/REPLACE_WITH_YOUR_USERNAME/TG2
+ExecStart=/home/REPLACE_WITH_YOUR_USERNAME/TG2/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

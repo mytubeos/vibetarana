@@ -30,7 +30,16 @@ class AssistantPool:
     def __init__(self) -> None:
         self.assistants: list[Assistant] = []
         self._chat_assignment: dict[int, int] = {}
-        self._locks: dict[int, asyncio.Lock] = {}
+        # One lock for the whole pool, not per-chat: the thing being
+        # protected (an assistant's free capacity) is shared across every
+        # chat, so two different chats' get_or_assign() calls racing each
+        # other could both see the same assistant as having room and both
+        # assign to it — one of them then never actually joins the voice
+        # chat at the Telegram level (a single account can only be in one
+        # call at a time), later surfacing as NoActiveGroupCall on /stop.
+        # Confirmed live: two /play commands in two different chats close
+        # together with only one assistant configured.
+        self._assign_lock = asyncio.Lock()
 
     async def start(self) -> None:
         for i, session_string in enumerate(settings.assistant_sessions):
@@ -70,17 +79,12 @@ class AssistantPool:
             except Exception:
                 logger.warning("Assistant %d did not stop cleanly", assistant.index, exc_info=True)
 
-    def _lock_for(self, chat_id: int) -> asyncio.Lock:
-        if chat_id not in self._locks:
-            self._locks[chat_id] = asyncio.Lock()
-        return self._locks[chat_id]
-
     async def get_or_assign(self, chat_id: int) -> Assistant | None:
         """Return the assistant handling this chat. If none is assigned yet,
         pick the least-loaded healthy assistant with free capacity. Returns
         None if every assistant is at MAX_VC_PER_ASSISTANT capacity.
         """
-        async with self._lock_for(chat_id):
+        async with self._assign_lock:
             existing_index = self._chat_assignment.get(chat_id)
             if existing_index is not None:
                 assistant = self.assistants[existing_index]

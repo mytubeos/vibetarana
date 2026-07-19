@@ -85,3 +85,58 @@ async def play_cmd(_: Client, message: Message) -> None:
 @Client.on_message(filters.command("vplay") & filters.group & admin_filter)
 async def vplay_cmd(_: Client, message: Message) -> None:
     await _resolve_and_queue(message, video=True)
+
+
+async def _resolve_and_force_play(message: Message, *, video: bool) -> None:
+    """/playforce and /vplayforce — unlike _resolve_and_queue(), never adds
+    to the queue: immediately hot-swaps whatever's currently playing for the
+    requested track, discarding it (queues.force_add), and picks up the
+    rest of the existing queue normally once this one finishes."""
+    command_name = "vplayforce" if video else "playforce"
+    if len(message.command) < 2:
+        await message.reply_text(
+            f"Usage: /{command_name} <song name, YouTube/Spotify/Apple Music/SoundCloud link>",
+            parse_mode=ParseMode.DISABLED,
+        )
+        return
+
+    query = message.text.split(None, 1)[1]
+    chat_id = message.chat.id
+    status = await message.reply_text(f"Searching for {query}...", parse_mode=ParseMode.DISABLED)
+
+    track = await resolve(
+        query,
+        requested_by=message.from_user.id,
+        requested_by_name=message.from_user.first_name or "someone",
+    )
+    if track is None:
+        await status.edit_text("Couldn't find anything for that query.")
+        return
+    track.video = video
+
+    await status.edit_text(f"🔗 Loading stream for {track.title}... (up to 20s)", parse_mode=ParseMode.DISABLED)
+    queues.force_add(chat_id, track)
+    assistant = await calls.force_play(chat_id, track)
+    if assistant is None:
+        queues.clear(chat_id)
+        await status.edit_text(
+            "Couldn't start playback — either all assistants are busy right now, "
+            "or that track failed to load. Try again in a bit or pick a different track."
+        )
+        return
+
+    prefix = "🎥" if video else "🎵"
+    await status.edit_text(
+        track_block(track, heading=f"{prefix} NOW PLAYING (forced)", footer="▶️ Playing"),
+        reply_markup=playback_keyboard(paused=False),
+    )
+
+
+@Client.on_message(filters.command("playforce") & filters.group & admin_filter)
+async def playforce_cmd(_: Client, message: Message) -> None:
+    await _resolve_and_force_play(message, video=False)
+
+
+@Client.on_message(filters.command("vplayforce") & filters.group & admin_filter)
+async def vplayforce_cmd(_: Client, message: Message) -> None:
+    await _resolve_and_force_play(message, video=True)

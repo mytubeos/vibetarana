@@ -58,11 +58,13 @@ _pending_leave_tasks: dict[int, asyncio.Task] = {}
 # reason to pay it again right at skip/auto-advance time. schedule_prefetch()
 # resolves it in the background while the current track plays; _play_track()
 # uses the cached URLs instead of re-resolving if they're ready in time.
-# Keyed by id(track) — a track's own object identity is a fine cache key
-# for its short lifetime in one chat's queue, and entries are popped as soon
-# as they're consumed (or the resolve fails), so nothing lingers.
+# Keyed by id(track) — a track's own object identity is a fine cache key for
+# its short lifetime in one chat's queue. Entries are popped as soon as
+# they're consumed; a prefetched track that never gets played (cleared/
+# shuffled/stopped first) instead ages out via _PREFETCH_CACHE_MAX_ENTRIES.
 _prefetch_cache: dict[int, tuple[str, str]] = {}
 _prefetch_tasks: dict[int, asyncio.Task] = {}
+_PREFETCH_CACHE_MAX_ENTRIES = 20
 
 # Matches MediaStream's own default (VideoQuality.HD_720p, adjust_by_height=
 # False) — schedule_prefetch() has no MediaStream instance yet to read this
@@ -148,7 +150,15 @@ def patch_ytdlp_timeout() -> None:
 
 def _cancel_pending_leave(chat_id: int) -> None:
     task = _pending_leave_tasks.pop(chat_id, None)
-    if task and not task.done():
+    # The grace timer's own callback calls stop() (below), which calls this
+    # — at that point `task` IS the currently-running task, and
+    # task.cancel()-ing yourself schedules a CancelledError at your own next
+    # await. That await is `leave_call()` a few lines into stop(), so the
+    # real Telegram "leave the voice chat" call could get interrupted
+    # mid-flight every single time the bot auto-leaves from silence —
+    # normal /stop or a fresh /play cancelling *someone else's* pending
+    # timer is unaffected, since `task` is never the caller's own there.
+    if task and not task.done() and task is not asyncio.current_task():
         task.cancel()
 
 
@@ -207,6 +217,13 @@ def schedule_prefetch(chat_id: int) -> None:
             logger.warning("Prefetch failed for %r", next_track.title, exc_info=True)
         else:
             _prefetch_cache[key] = urls
+            # A prefetched track that's cleared/shuffled/stopped before its
+            # turn leaves an orphaned entry here forever (nothing else
+            # references it to know it's safe to drop) — bound it rather
+            # than track every such path, so months of unattended uptime
+            # can't accumulate unbounded entries.
+            while len(_prefetch_cache) > _PREFETCH_CACHE_MAX_ENTRIES:
+                _prefetch_cache.pop(next(iter(_prefetch_cache)))
         finally:
             _prefetch_tasks.pop(key, None)
 
@@ -318,6 +335,23 @@ async def join_and_play(chat_id: int, track: Track) -> Assistant | None:
     _cancel_pending_leave(chat_id)
     if not await _play_track(assistant, chat_id, track):
         pool.release(chat_id)
+        return None
+    return assistant
+
+
+async def force_play(chat_id: int, track: Track) -> Assistant | None:
+    """Entry point for /playforce and /vplayforce — immediately hot-swaps
+    the chat's stream to `track`, same as join_and_play() if the chat was
+    idle, but if it already has an assistant this reuses it directly
+    (re-calling .play() on a live call swaps the stream in place rather
+    than leaving/rejoining, same mechanism seek() relies on) instead of
+    going through pool assignment again. Caller is responsible for having
+    already put `track` at queue index 0 (queues.force_add)."""
+    assistant = _get_healthy_assistant(chat_id)
+    if assistant is None:
+        return await join_and_play(chat_id, track)
+    _cancel_pending_leave(chat_id)
+    if not await _play_track(assistant, chat_id, track):
         return None
     return assistant
 

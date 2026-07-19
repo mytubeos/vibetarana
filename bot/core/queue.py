@@ -85,6 +85,18 @@ class QueueManager:
         state.queue.append(track)
         return len(state.queue)
 
+    def force_add(self, chat_id: int, track: Track) -> None:
+        """Used by /playforce and /vplayforce — replaces whatever's at index
+        0 (currently playing, or about to be) with `track`. The interrupted
+        track is discarded, not requeued: "force" means override, not
+        pause-for-later. Everything after index 0 is untouched, so the rest
+        of the queue picks up normally once `track` finishes."""
+        state = self.get(chat_id)
+        if state.queue:
+            state.queue[0] = track
+        else:
+            state.queue.append(track)
+
     def advance(self, chat_id: int, *, force: bool = False) -> Track | None:
         """Drop the finished/skipped track, return the next one to play (or
         None if empty). Under loop_mode "one", a natural stream-end (force=

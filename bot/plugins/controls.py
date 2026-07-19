@@ -40,6 +40,25 @@ async def stop_cmd(_: Client, message: Message) -> None:
     await message.reply_text("⏹ Stopped and left the voice chat." if ok else "Nothing was playing.")
 
 
+@Client.on_message(filters.command("player") & filters.group & admin_filter)
+async def player_cmd(_: Client, message: Message) -> None:
+    """Re-shows the current track as an interactive card with the same
+    pause/resume/skip/stop buttons as a fresh "now playing" message —
+    for pulling the panel back up without touching playback."""
+    state = queues.get(message.chat.id)
+    if state.current is None:
+        await message.reply_text("Nothing is playing right now.")
+        return
+    await message.reply_text(
+        track_block(
+            state.current,
+            heading="🎵 NOW PLAYING",
+            footer="⏸ Paused" if state.is_paused else "▶️ Playing",
+        ),
+        reply_markup=playback_keyboard(paused=state.is_paused),
+    )
+
+
 @Client.on_message(filters.command("seek") & filters.group & admin_filter)
 async def seek_cmd(_: Client, message: Message) -> None:
     if len(message.command) < 2 or not message.command[1].lstrip("-").isdigit():

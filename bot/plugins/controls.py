@@ -7,7 +7,7 @@ from pyrogram.types import CallbackQuery, Message
 from bot.core import calls
 from bot.core.decorators import admin_filter, user_is_admin_or_owner
 from bot.core.queue import queues
-from bot.utils.formatting import playback_keyboard, track_block
+from bot.utils.formatting import edit_card_status, edit_track_card, playback_keyboard, reply_track_card, track_block
 
 
 @Client.on_message(filters.command("pause") & filters.group & admin_filter)
@@ -28,9 +28,8 @@ async def skip_cmd(_: Client, message: Message) -> None:
     if next_track is None:
         await message.reply_text("Queue is empty — leaving the voice chat shortly if nothing else is added.")
     else:
-        await message.reply_text(
-            track_block(next_track, heading="⏭ NOW PLAYING", footer="▶️ Playing"),
-            reply_markup=playback_keyboard(paused=False),
+        await reply_track_card(
+            message, next_track, heading="⏭ NOW PLAYING", footer="▶️ Playing", keyboard=playback_keyboard(paused=False)
         )
 
 
@@ -49,13 +48,12 @@ async def player_cmd(_: Client, message: Message) -> None:
     if state.current is None:
         await message.reply_text("Nothing is playing right now.")
         return
-    await message.reply_text(
-        track_block(
-            state.current,
-            heading="🎵 NOW PLAYING",
-            footer="⏸ Paused" if state.is_paused else "▶️ Playing",
-        ),
-        reply_markup=playback_keyboard(paused=state.is_paused),
+    await reply_track_card(
+        message,
+        state.current,
+        heading="🎵 NOW PLAYING",
+        footer="⏸ Paused" if state.is_paused else "▶️ Playing",
+        keyboard=playback_keyboard(paused=state.is_paused),
     )
 
 
@@ -97,20 +95,26 @@ async def playback_callback(client: Client, callback_query: CallbackQuery) -> No
         next_track = await calls.skip(chat_id)
         await callback_query.answer("⏭ Skipped")
         if next_track is None:
-            await callback_query.message.edit_text(
-                "Queue is empty — leaving the voice chat shortly if nothing else is added."
+            # No keyboard passed — clears it, since pause/skip/stop no
+            # longer do anything useful once the queue's empty.
+            await edit_card_status(
+                callback_query.message,
+                "Queue is empty — leaving the voice chat shortly if nothing else is added.",
             )
         else:
-            await callback_query.message.edit_text(
-                track_block(next_track, heading="⏭ NOW PLAYING", footer="▶️ Playing"),
-                reply_markup=playback_keyboard(paused=False),
+            await edit_track_card(
+                callback_query.message,
+                next_track,
+                heading="⏭ NOW PLAYING",
+                footer="▶️ Playing",
+                keyboard=playback_keyboard(paused=False),
             )
         return
 
     if action == "stop":
         await calls.stop(chat_id)
         await callback_query.answer("⏹ Stopped")
-        await callback_query.message.edit_text("⏹ Stopped and left the voice chat.")
+        await edit_card_status(callback_query.message, "⏹ Stopped and left the voice chat.")
         return
 
     ok = await (calls.pause(chat_id) if action == "pause" else calls.resume(chat_id))
@@ -120,11 +124,8 @@ async def playback_callback(client: Client, callback_query: CallbackQuery) -> No
 
     current = queues.get(chat_id).current
     if current is not None:
-        await callback_query.message.edit_text(
-            track_block(
-                current,
-                heading="🎵 NOW PLAYING",
-                footer="⏸ Paused" if action == "pause" else "▶️ Playing",
-            ),
-            reply_markup=playback_keyboard(paused=action == "pause"),
+        await edit_card_status(
+            callback_query.message,
+            track_block(current, heading="🎵 NOW PLAYING", footer="⏸ Paused" if action == "pause" else "▶️ Playing"),
+            keyboard=playback_keyboard(paused=action == "pause"),
         )

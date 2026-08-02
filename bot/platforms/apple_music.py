@@ -68,12 +68,16 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
     title = item.get("trackName") or "Unknown title"
     artist = item.get("artistName") or ""
     search_query = f"{title} {artist}".strip()
+    duration_ms = item.get("trackTimeMillis")
 
-    yt_track = await youtube_resolve(search_query, requested_by, requested_by_name)
+    yt_track = await youtube_resolve(
+        search_query,
+        requested_by,
+        requested_by_name,
+        expected_duration_seconds=round(duration_ms / 1000) if isinstance(duration_ms, int) else None,
+    )
     if yt_track is None:
         return None
-
-    duration_ms = item.get("trackTimeMillis")
 
     return Track(
         title=f"{title} - {artist}" if artist else title,

@@ -11,7 +11,7 @@ import re
 from py_yt import Recommendations, Video, VideosSearch
 
 from bot.core.queue import Track
-from bot.utils.formatting import format_ms
+from bot.utils.formatting import format_ms, parse_duration_to_seconds
 from bot.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,6 +20,35 @@ _YOUTUBE_HOST_RE = re.compile(r"(youtube\.com|youtu\.be)", re.IGNORECASE)
 _VIDEO_ID_RE = re.compile(
     r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})"
 )
+
+# Search took the literal #1 result with zero filtering — no duration
+# check, no live-stream/cover/remix filtering. Usually fine, but fetching a
+# few more candidates and picking a better one catches the cases where it
+# isn't, at the cost of one still-cheap py_yt call (this is metadata search,
+# not the yt-dlp extraction step — nowhere near the ~15-20s cost).
+_SEARCH_CANDIDATES = 5
+
+
+def _is_probably_live(item: dict) -> bool:
+    # py_yt leaves `duration` falsy for live streams (this file's own
+    # pre-existing "Live" display fallback below relies on the same signal).
+    return not item.get("duration")
+
+
+def _pick_best_result(items: list[dict], expected_duration_seconds: int | None) -> dict:
+    """Prefer a non-live result; among those, the closest duration match if
+    the caller (Spotify/Apple Music) knows the track's real length. Plain
+    text searches have no expected duration to compare against, so they just
+    get the first non-live candidate — unchanged from the old "take #1"
+    behavior, just with live streams deprioritized instead of blindly taken."""
+    non_live = [item for item in items if not _is_probably_live(item)]
+    pool = non_live or items  # everything found is live: no better option
+    if expected_duration_seconds is None:
+        return pool[0]
+    return min(
+        pool,
+        key=lambda item: abs(parse_duration_to_seconds(item.get("duration") or "0") - expected_duration_seconds),
+    )
 
 
 def matches(query: str) -> bool:
@@ -31,9 +60,16 @@ def _extract_video_id(url: str) -> str | None:
     return match.group(1) if match else None
 
 
-async def resolve(query: str, requested_by: int, requested_by_name: str) -> Track | None:
+async def resolve(
+    query: str, requested_by: int, requested_by_name: str, expected_duration_seconds: int | None = None
+) -> Track | None:
     """Resolve `query` (plain text or a youtube.com/youtu.be link) into a
-    Track, or None if nothing was found / the search failed."""
+    Track, or None if nothing was found / the search failed. A direct link
+    is unambiguous and never uses `expected_duration_seconds` (only the
+    plain-text search path below picks among multiple candidates); Spotify/
+    Apple Music pass their catalog's known duration through this to bias the
+    pick toward the real track over a cover/remix/extended mix sharing its
+    title."""
     video_id = _extract_video_id(query) if matches(query) else None
 
     if video_id:
@@ -67,7 +103,7 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
         )
 
     try:
-        results = await VideosSearch(query, limit=1).next()
+        results = await VideosSearch(query, limit=_SEARCH_CANDIDATES).next()
     except Exception:
         logger.warning("YouTube search failed for query=%r", query, exc_info=True)
         return None
@@ -75,7 +111,7 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
     items = results.get("result") or []
     if not items:
         return None
-    item = items[0]
+    item = _pick_best_result(items, expected_duration_seconds)
     thumbnails = item.get("thumbnails") or []
     thumbnail = thumbnails[-1]["url"] if thumbnails else None
 

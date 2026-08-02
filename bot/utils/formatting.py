@@ -1,7 +1,8 @@
 """Small shared display-formatting helpers."""
 from __future__ import annotations
 
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram import Client
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message
 
 from bot.core.queue import Track
 
@@ -83,3 +84,65 @@ def playback_keyboard(*, paused: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⏹ Stop", callback_data="vt:stop")],
         ]
     )
+
+
+# --- Track "card" senders — thumbnail image + track_block() as a caption,
+# falling back to plain text when a track has no thumbnail (e.g.
+# bot/platforms/direct_link.py never has one). Four variants because the
+# call sites genuinely differ in shape: replying to a Message, sending fresh
+# via a Client with no originating Message (autoplay), and editing an
+# already-sent card in place (skip/pause/resume) — which itself splits into
+# "swap to a different track" vs. "same track, just the status line".
+
+
+async def reply_track_card(
+    message: Message, track: Track, *, heading: str, footer: str | None = None, keyboard: InlineKeyboardMarkup | None = None
+) -> Message:
+    caption = track_block(track, heading=heading, footer=footer)
+    if track.thumbnail:
+        return await message.reply_photo(track.thumbnail, caption=caption, reply_markup=keyboard)
+    return await message.reply_text(caption, reply_markup=keyboard)
+
+
+async def send_track_card(
+    client: Client,
+    chat_id: int,
+    track: Track,
+    *,
+    heading: str,
+    footer: str | None = None,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> Message:
+    caption = track_block(track, heading=heading, footer=footer)
+    if track.thumbnail:
+        return await client.send_photo(chat_id, track.thumbnail, caption=caption, reply_markup=keyboard)
+    return await client.send_message(chat_id, caption, reply_markup=keyboard)
+
+
+async def edit_track_card(
+    target: Message, track: Track, *, heading: str, footer: str | None = None, keyboard: InlineKeyboardMarkup | None = None
+) -> None:
+    """Updates an already-sent now-playing card in place to show a
+    *different* track — used when skip/autoplay replaces what a live card is
+    showing. Telegram has no way to turn a text message into a photo via
+    edit, so this only swaps the photo when `target` already has one (the
+    common case); otherwise it falls back to editing the text, same as
+    before this track-card feature existed."""
+    caption = track_block(track, heading=heading, footer=footer)
+    if target.photo and track.thumbnail:
+        await target.edit_media(InputMediaPhoto(track.thumbnail, caption=caption), reply_markup=keyboard)
+    else:
+        await target.edit_text(caption, reply_markup=keyboard)
+
+
+async def edit_card_status(target: Message, text: str, *, keyboard: InlineKeyboardMarkup | None = None) -> None:
+    """Updates just the status line/keyboard on an already-sent now-playing
+    card without changing which track/photo it shows — pause/resume (same
+    track) and the queue-emptied/stopped end states. Omitting `keyboard`
+    clears any existing one, same Bot API semantics as before this feature —
+    used deliberately for the stopped/queue-empty cases, where the buttons
+    no longer do anything useful."""
+    if target.photo:
+        await target.edit_caption(text, reply_markup=keyboard)
+    else:
+        await target.edit_text(text, reply_markup=keyboard)

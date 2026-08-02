@@ -11,7 +11,7 @@ from bot.core import calls
 from bot.core.decorators import admin_filter
 from bot.core.queue import queues
 from bot.platforms import resolve
-from bot.utils.formatting import playback_keyboard, track_block
+from bot.utils.formatting import playback_keyboard, reply_track_card
 
 
 async def _resolve_and_queue(message: Message, *, video: bool) -> None:
@@ -70,10 +70,17 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
         )
         return
 
+    # The final card gets the track's thumbnail (reply_track_card sends a
+    # fresh photo message for that); `status`'s progress text can't become
+    # one via edit (Telegram has no text->photo edit), so it's dropped
+    # instead of left dangling alongside the new card.
+    try:
+        await status.delete()
+    except Exception:
+        pass
     prefix = "🎥" if video else "🎵"
-    await status.edit_text(
-        track_block(track, heading=f"{prefix} NOW PLAYING", footer="▶️ Playing"),
-        reply_markup=playback_keyboard(paused=False),
+    await reply_track_card(
+        message, track, heading=f"{prefix} NOW PLAYING", footer="▶️ Playing", keyboard=playback_keyboard(paused=False)
     )
 
 
@@ -125,10 +132,17 @@ async def _resolve_and_force_play(message: Message, *, video: bool) -> None:
         )
         return
 
+    try:
+        await status.delete()
+    except Exception:
+        pass
     prefix = "🎥" if video else "🎵"
-    await status.edit_text(
-        track_block(track, heading=f"{prefix} NOW PLAYING (forced)", footer="▶️ Playing"),
-        reply_markup=playback_keyboard(paused=False),
+    await reply_track_card(
+        message,
+        track,
+        heading=f"{prefix} NOW PLAYING (forced)",
+        footer="▶️ Playing",
+        keyboard=playback_keyboard(paused=False),
     )
 
 

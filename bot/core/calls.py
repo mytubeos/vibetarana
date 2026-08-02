@@ -5,7 +5,9 @@ empty voice chat.
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -21,6 +23,7 @@ from bot.core.assistants import Assistant, pool
 from bot.core.client import bot
 from bot.core.queue import Track, queues
 from bot.platforms import youtube
+from bot.utils.formatting import playback_keyboard, send_track_card
 from bot.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -66,10 +69,51 @@ _prefetch_cache: dict[int, tuple[str, str]] = {}
 _prefetch_tasks: dict[int, asyncio.Task] = {}
 _PREFETCH_CACHE_MAX_ENTRIES = 20
 
-# Matches MediaStream's own default (VideoQuality.HD_720p, adjust_by_height=
-# False) — schedule_prefetch() has no MediaStream instance yet to read this
-# off of, since resolving is the whole point of building one.
-_DEFAULT_VIDEO_PARAMETERS = VideoParameters(*VideoQuality.HD_720p.value, adjust_by_height=False)
+# Bot-wide companion to _prefetch_cache above: that one is per-chat and
+# consumed once (popped the moment a track plays), so replaying the same
+# song a few minutes later — even in a different chat — paid full
+# extraction again. This is keyed by video ID instead of object identity, so
+# it survives across chats/queues. googlevideo.com URLs are typically valid
+# for several hours; stay well under that so a cache "hit" is never a stale
+# link the player rejects mid-playback.
+_VIDEO_ID_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})")
+_RESOLVED_URL_CACHE_TTL_SECONDS = 4 * 3600
+_RESOLVED_URL_CACHE_MAX_ENTRIES = 200
+_resolved_url_cache: dict[str, tuple[str, str, float]] = {}
+
+
+def _cached_urls_get(link: str) -> tuple[str, str] | None:
+    match = _VIDEO_ID_RE.search(link)
+    if match is None:
+        return None
+    entry = _resolved_url_cache.get(match.group(1))
+    if entry is None:
+        return None
+    video_url, audio_url, resolved_at = entry
+    if time.monotonic() - resolved_at > _RESOLVED_URL_CACHE_TTL_SECONDS:
+        del _resolved_url_cache[match.group(1)]
+        return None
+    return video_url, audio_url
+
+
+def _cached_urls_put(link: str, urls: tuple[str, str]) -> None:
+    match = _VIDEO_ID_RE.search(link)
+    if match is None:
+        # Non-YouTube link (e.g. bot/platforms/direct_link.py) — no stable
+        # ID to key a cross-chat cache on, so this is a silent no-op rather
+        # than a cache that can never be a hit.
+        return
+    _resolved_url_cache[match.group(1)] = (*urls, time.monotonic())
+    while len(_resolved_url_cache) > _RESOLVED_URL_CACHE_MAX_ENTRIES:
+        _resolved_url_cache.pop(next(iter(_resolved_url_cache)))
+
+
+# Bumped from HD_720p — pytgcalls supports up to UHD_4K, but Render's free
+# tier has a tight, shared CPU budget that a jump straight to 4K would blow
+# through on /vplay (more ffmpeg encode/relay work per stream). FHD_1080p is
+# a deliberate one-step-up test, not a max-out — if playback stability
+# regresses, this is the first thing to revert.
+_DEFAULT_VIDEO_PARAMETERS = VideoParameters(*VideoQuality.FHD_1080p.value, adjust_by_height=False)
 
 
 def setup_cookies() -> None:
@@ -117,6 +161,15 @@ def patch_ytdlp_timeout() -> None:
             'bestvideo[vcodec~="(vp09|avc1)"]+m4a/best',
             "-S",
             f"res:{min(video_parameters.width, video_parameters.height)}",
+            # The "web" client (yt-dlp's default) is what needs the slow
+            # Deno JS-challenge in the first place. Trying "android" first
+            # skips that challenge for most videos; "web" stays as a
+            # comma-separated fallback for whatever android can't resolve,
+            # so this can only add reliability, not remove it. Worth
+            # re-checking if extraction time regresses after a yt-dlp
+            # upgrade — YouTube vs. yt-dlp support for this shifts over time.
+            "--extractor-args",
+            "youtube:player_client=android,web",
             "--no-warnings",
         ]
         if add_commands:
@@ -217,6 +270,7 @@ def schedule_prefetch(chat_id: int) -> None:
             logger.warning("Prefetch failed for %r", next_track.title, exc_info=True)
         else:
             _prefetch_cache[key] = urls
+            _cached_urls_put(next_track.link, urls)
             # A prefetched track that's cleared/shuffled/stopped before its
             # turn leaves an orphaned entry here forever (nothing else
             # references it to know it's safe to drop) — bound it rather
@@ -235,16 +289,25 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
     (deleted video, region-blocked, unsupported format, network issue) —
     never raises, so callers can react (try the next track, report an
     error) instead of leaving the chat silently wedged."""
-    cached = _prefetch_cache.pop(id(track), None)
+    # Three tiers, cheapest first: this chat's own prefetch (already
+    # resolved in the background for exactly this track), the bot-wide
+    # cross-chat cache (someone resolved this same video recently), and only
+    # then a fresh, explicit extraction — which also populates the
+    # bot-wide cache so the *next* request for this song, in any chat,
+    # can hit it. Resolving explicitly here (rather than handing
+    # MediaStream(track.link, ...) to py-tgcalls and letting it call
+    # YtDlp.extract internally, as before) is what makes that caching
+    # possible — same underlying (patched) extractor either way.
+    urls = _prefetch_cache.pop(id(track), None) or _cached_urls_get(track.link)
     try:
-        if cached is not None:
-            # Already a googlevideo.com URL, not a youtube.com one — pytgcalls'
-            # own is_valid() check (see ytdlp.py) fails on it, so check_stream()
-            # skips straight past re-extracting and uses it as-is.
-            video_url, audio_url = cached
-            stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track))
-        else:
-            stream = MediaStream(track.link, video_flags=_video_flags(track))
+        if urls is None:
+            urls = await YtDlp.extract(track.link, _DEFAULT_VIDEO_PARAMETERS, None)
+            _cached_urls_put(track.link, urls)
+        # Already googlevideo.com URLs, not youtube.com ones — pytgcalls' own
+        # is_valid() check (see ytdlp.py) fails on them, so check_stream()
+        # skips straight past re-extracting and uses them as-is.
+        video_url, audio_url = urls
+        stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track))
         await assistant.call_py.play(chat_id, stream)
     except Exception:
         logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
@@ -279,7 +342,9 @@ async def _try_autoplay(chat_id: int) -> bool:
         queues.advance(chat_id, force=True)  # pop the broken pick back out
         return False
     try:
-        await bot.send_message(chat_id, f"🔁 Autoplay: **{related.title}** ({related.duration})")
+        await send_track_card(
+            bot, chat_id, related, heading="🔁 AUTOPLAY", footer="▶️ Playing", keyboard=playback_keyboard(paused=False)
+        )
     except Exception:
         logger.warning("Failed to send autoplay announcement in %d", chat_id, exc_info=True)
     return True

@@ -107,13 +107,18 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
     title = data.get("name") or "Unknown title"
     artists = ", ".join(a["name"] for a in data.get("artists", []) if a.get("name"))
     search_query = f"{title} {artists}".strip()
+    duration_ms = data.get("duration_ms")
 
-    yt_track = await youtube_resolve(search_query, requested_by, requested_by_name)
+    yt_track = await youtube_resolve(
+        search_query,
+        requested_by,
+        requested_by_name,
+        expected_duration_seconds=round(duration_ms / 1000) if isinstance(duration_ms, int) else None,
+    )
     if yt_track is None:
         return None
 
     images = (data.get("album") or {}).get("images") or []
-    duration_ms = data.get("duration_ms")
 
     return Track(
         title=f"{title} - {artists}" if artists else title,

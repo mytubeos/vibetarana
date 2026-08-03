@@ -8,7 +8,12 @@ from pyrogram import idle
 
 from bot.core import db
 from bot.core.assistants import pool
-from bot.core.calls import patch_ytdlp_timeout, register_all_handlers, setup_cookies
+from bot.core.calls import (
+    patch_ytdlp_timeout,
+    register_all_handlers,
+    setup_cookies,
+    stale_assignment_check_loop,
+)
 from bot.core.client import bot
 from bot.utils.keepalive import start_keepalive_server
 from bot.utils.logger import get_logger
@@ -39,6 +44,7 @@ async def main() -> None:
                 try:
                     register_all_handlers()
                     asyncio.create_task(pool.health_check_loop())
+                    asyncio.create_task(stale_assignment_check_loop())
 
                     logger.info(
                         "Ready — %d assistant(s) online, %d chat(s) each",

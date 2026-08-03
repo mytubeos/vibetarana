@@ -142,10 +142,44 @@ def setup_cookies() -> None:
 YTDLP_SUBPROCESS_TIMEOUT_SECONDS = 60
 
 
+async def _run_ytdlp_extract(
+    link: str, video_parameters: VideoParameters, add_commands: Optional[str], player_client: str
+) -> Tuple[str, str]:
+    commands = [
+        "yt-dlp",
+        "-g",
+        "-f",
+        'bestvideo[vcodec~="(vp09|avc1)"]+m4a/best',
+        "-S",
+        f"res:{min(video_parameters.width, video_parameters.height)}",
+        "--extractor-args",
+        f"youtube:player_client={player_client}",
+        "--no-warnings",
+    ]
+    if add_commands:
+        commands += await cleanup_commands(shlex.split(add_commands), "yt-dlp", ["-f", "-g", "--no-warnings"])
+    commands.append(link)
+    proc = await asyncio.create_subprocess_exec(
+        *commands, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), YTDLP_SUBPROCESS_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        proc.terminate()
+        raise YtDlpError("yt-dlp process timeout")
+    if stderr:
+        raise YtDlpError(stderr.decode())
+    data = stdout.decode().strip().split("\n")
+    if data and data[0]:
+        return data[0], data[1] if len(data) >= 2 else data[0]
+    raise YtDlpError("No video URLs found")
+
+
 def patch_ytdlp_timeout() -> None:
     """Call once at startup, after setup_cookies(). Replaces YtDlp.extract
     with a copy of itself that waits YTDLP_SUBPROCESS_TIMEOUT_SECONDS instead
-    of py-tgcalls' hardcoded 20."""
+    of py-tgcalls' hardcoded 20, and tries the "android" player client before
+    falling back to "web"."""
 
     async def patched_extract(
         link: Optional[str],
@@ -154,46 +188,24 @@ def patch_ytdlp_timeout() -> None:
     ) -> Tuple[Optional[str], Optional[str]]:
         if link is None:
             return None, None
-        commands = [
-            "yt-dlp",
-            "-g",
-            "-f",
-            'bestvideo[vcodec~="(vp09|avc1)"]+m4a/best',
-            "-S",
-            f"res:{min(video_parameters.width, video_parameters.height)}",
-            # The "web" client (yt-dlp's default) is what needs the slow
-            # Deno JS-challenge in the first place. Trying "android" first
-            # skips that challenge for most videos; "web" stays as a
-            # comma-separated fallback for whatever android can't resolve,
-            # so this can only add reliability, not remove it. Worth
-            # re-checking if extraction time regresses after a yt-dlp
-            # upgrade — YouTube vs. yt-dlp support for this shifts over time.
-            "--extractor-args",
-            "youtube:player_client=android,web",
-            "--no-warnings",
-        ]
-        if add_commands:
-            commands += await cleanup_commands(
-                shlex.split(add_commands), "yt-dlp", ["-f", "-g", "--no-warnings"]
-            )
-        commands.append(link)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *commands, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), YTDLP_SUBPROCESS_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                proc.terminate()
-                raise YtDlpError("yt-dlp process timeout")
-            if stderr:
-                raise YtDlpError(stderr.decode())
-            data = stdout.decode().strip().split("\n")
-            if data:
-                return data[0], data[1] if len(data) >= 2 else data[0]
-            raise YtDlpError("No video URLs found")
+                # The "web" client (yt-dlp's default) is what needs the slow
+                # Deno JS-challenge in the first place; "android" usually
+                # skips it. Measured live: listing both clients at once
+                # ("player_client=android,web") always queries BOTH — yt-dlp
+                # doesn't stop at the first one with a usable format — which
+                # measured ~10s here vs. ~6s for android alone. So this tries
+                # android by itself first, and only pays for a second,
+                # separate web attempt on the (uncommon) videos android can't
+                # resolve at all — same reliability as before, faster common
+                # case, slower rare-fallback case (worth re-checking if
+                # extraction time regresses after a yt-dlp upgrade — YouTube
+                # vs. yt-dlp support for this shifts over time).
+                return await _run_ytdlp_extract(link, video_parameters, add_commands, "android")
+            except YtDlpError:
+                logger.info("android-only extraction failed for %s, retrying with web", link)
+                return await _run_ytdlp_extract(link, video_parameters, add_commands, "web")
         except FileNotFoundError:
             raise YtDlpError("yt-dlp is not installed on your system")
 
@@ -468,6 +480,57 @@ async def stop(chat_id: int) -> bool:
     except Exception:
         logger.warning("leave_call failed for chat %d", chat_id, exc_info=True)
     return True
+
+
+# How many consecutive stale_assignment_check_loop() cycles a chat must miss
+# before its assistant slot is force-released. Not 1 — a chat that just
+# called get_or_assign() legitimately has no active call yet for the first
+# few seconds while _play_track() is still resolving/joining, and the
+# android-then-web extraction fallback can legitimately take up to ~120s in
+# the worst case (two 60s yt-dlp timeouts back to back). 3 cycles at the
+# default 60s interval is comfortably above that, so this only ever fires
+# for a chat_id that's genuinely been abandoned, not one still starting up.
+_STALE_ASSIGNMENT_THRESHOLD = 3
+_stale_sightings: dict[int, int] = {}
+
+
+async def stale_assignment_check_loop(interval_seconds: int = 60) -> None:
+    """Periodically cross-checks the pool's own bookkeeping (which chats
+    each assistant thinks it's assigned to) against pytgcalls' own view of
+    which calls are actually still active (assistant.call_py.calls) —
+    catches an assistant staying permanently "assigned" to a chat whose
+    voice chat ended some way other than /stop or the queue naturally
+    emptying (e.g. a group admin ends the Telegram voice chat directly,
+    with no bot command involved) — nothing else in this codebase notices
+    that, so the slot would otherwise sit unusable by any other chat until
+    someone remembers to run /stop there. loop_mode/queue state can't
+    substitute for this check: both stay however they were the instant the
+    real call died, so they look identical to a genuinely-still-playing
+    chat from inside the bot."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        for assistant in pool.assistants:
+            if not assistant.healthy:
+                continue
+            try:
+                active_calls = await assistant.call_py.calls
+            except Exception:
+                logger.warning("Failed to list active calls for assistant %d", assistant.index, exc_info=True)
+                continue
+            for chat_id in list(assistant.chats):
+                if chat_id in active_calls:
+                    _stale_sightings.pop(chat_id, None)
+                    continue
+                count = _stale_sightings.get(chat_id, 0) + 1
+                if count < _STALE_ASSIGNMENT_THRESHOLD:
+                    _stale_sightings[chat_id] = count
+                    continue
+                _stale_sightings.pop(chat_id, None)
+                logger.warning(
+                    "Chat %d held assistant %d's slot with no active call for %d consecutive checks — releasing it",
+                    chat_id, assistant.index, count,
+                )
+                await stop(chat_id)
 
 
 async def seek(chat_id: int, seconds: int) -> bool:

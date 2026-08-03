@@ -175,6 +175,16 @@ async def _run_ytdlp_extract(
     raise YtDlpError("No video URLs found")
 
 
+# yt-dlp's own wording for YouTube's datacenter-IP bot-check (confirmed
+# live from a real Render failure, 2026-08-03 — cookies.txt had gone stale).
+# Distinct from every other extraction failure (SABR format-unavailability,
+# a dead/region-blocked video, etc.), and the fix is completely different
+# (re-export cookies, not a code change) — worth its own loud, greppable log
+# line instead of making whoever's debugging this at 2am read a traceback to
+# tell the two apart.
+_COOKIE_AUTH_ERROR_MARKER = "Sign in to confirm"
+
+
 def patch_ytdlp_timeout() -> None:
     """Call once at startup, after setup_cookies(). Replaces YtDlp.extract
     with a copy of itself that waits YTDLP_SUBPROCESS_TIMEOUT_SECONDS instead
@@ -203,9 +213,21 @@ def patch_ytdlp_timeout() -> None:
                 # extraction time regresses after a yt-dlp upgrade — YouTube
                 # vs. yt-dlp support for this shifts over time).
                 return await _run_ytdlp_extract(link, video_parameters, add_commands, "android")
-            except YtDlpError:
+            except YtDlpError as android_error:
                 logger.info("android-only extraction failed for %s, retrying with web", link)
-                return await _run_ytdlp_extract(link, video_parameters, add_commands, "web")
+                try:
+                    return await _run_ytdlp_extract(link, video_parameters, add_commands, "web")
+                except YtDlpError as web_error:
+                    if _COOKIE_AUTH_ERROR_MARKER in str(android_error) or _COOKIE_AUTH_ERROR_MARKER in str(web_error):
+                        logger.warning(
+                            "COOKIE AUTH FAILURE: YouTube rejected both player clients for %s with "
+                            "'Sign in to confirm you're not a bot' — this means cookies.txt is stale/invalid, "
+                            "NOT a code bug. Re-export fresh cookies (full export incl. google.com auth "
+                            "cookies, not youtube.com-only) and update Render's cookies.txt Secret File. "
+                            "See README's 'Known operational risks'.",
+                            link,
+                        )
+                    raise
         except FileNotFoundError:
             raise YtDlpError("yt-dlp is not installed on your system")
 

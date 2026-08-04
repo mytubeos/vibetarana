@@ -11,7 +11,7 @@ from bot.core import calls
 from bot.core.decorators import admin_filter
 from bot.core.queue import queues
 from bot.platforms import resolve
-from bot.utils.formatting import playback_keyboard, reply_track_card
+from bot.utils.formatting import playback_keyboard, reply_track_card, track_block
 
 
 async def _resolve_and_queue(message: Message, *, video: bool) -> None:

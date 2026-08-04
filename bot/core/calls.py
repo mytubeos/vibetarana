@@ -188,8 +188,8 @@ _COOKIE_AUTH_ERROR_MARKER = "Sign in to confirm"
 def patch_ytdlp_timeout() -> None:
     """Call once at startup, after setup_cookies(). Replaces YtDlp.extract
     with a copy of itself that waits YTDLP_SUBPROCESS_TIMEOUT_SECONDS instead
-    of py-tgcalls' hardcoded 20, and tries the "android" player client before
-    falling back to "web"."""
+    of py-tgcalls' hardcoded 20, and tries the "tv_embedded"+"android" player
+    clients before falling back to "web"."""
 
     async def patched_extract(
         link: Optional[str],
@@ -201,26 +201,33 @@ def patch_ytdlp_timeout() -> None:
         try:
             try:
                 # The "web" client (yt-dlp's default) is what needs the slow
-                # Deno JS-challenge in the first place; "android" usually
-                # skips it. Measured live: listing both clients at once
-                # ("player_client=android,web") always queries BOTH — yt-dlp
-                # doesn't stop at the first one with a usable format — which
-                # measured ~10s here vs. ~6s for android alone. So this tries
-                # android by itself first, and only pays for a second,
-                # separate web attempt on the (uncommon) videos android can't
-                # resolve at all — same reliability as before, faster common
-                # case, slower rare-fallback case (worth re-checking if
-                # extraction time regresses after a yt-dlp upgrade — YouTube
-                # vs. yt-dlp support for this shifts over time).
-                return await _run_ytdlp_extract(link, video_parameters, add_commands, "android")
-            except YtDlpError as android_error:
-                logger.info("android-only extraction failed for %s, retrying with web", link)
+                # Deno JS-challenge in the first place; "tv_embedded" and
+                # "android" both skip it. Measured live (2026-08-04): under
+                # YouTube's current SABR-streaming restrictions (see the
+                # cookie-check comment below's neighbor — a separate, active
+                # YouTube-side rollout), "android" alone only had access to
+                # the old 360p-capped itag 18 fallback format for every video
+                # tested; "tv_embedded" got 720p on the same videos, for the
+                # same ~5s cost. Listing both together here cost only ~6s
+                # (not double — unlike the android+web combo, neither of
+                # these needs the JS challenge, so querying both is just two
+                # cheap API calls), so this tries them together first and
+                # only pays for a separate, slower web attempt on the
+                # (uncommon) videos neither can resolve at all — same
+                # reliability as before, better common-case quality, no
+                # meaningful speed cost (worth re-checking if extraction
+                # quality/time regresses after a yt-dlp upgrade — YouTube's
+                # SABR rollout and yt-dlp's support for it are both moving
+                # targets right now).
+                return await _run_ytdlp_extract(link, video_parameters, add_commands, "tv_embedded,android")
+            except YtDlpError as first_attempt_error:
+                logger.info("tv_embedded+android extraction failed for %s, retrying with web", link)
                 try:
                     return await _run_ytdlp_extract(link, video_parameters, add_commands, "web")
                 except YtDlpError as web_error:
-                    if _COOKIE_AUTH_ERROR_MARKER in str(android_error) or _COOKIE_AUTH_ERROR_MARKER in str(web_error):
+                    if _COOKIE_AUTH_ERROR_MARKER in str(first_attempt_error) or _COOKIE_AUTH_ERROR_MARKER in str(web_error):
                         logger.warning(
-                            "COOKIE AUTH FAILURE: YouTube rejected both player clients for %s with "
+                            "COOKIE AUTH FAILURE: YouTube rejected every player client for %s with "
                             "'Sign in to confirm you're not a bot' — this means cookies.txt is stale/invalid, "
                             "NOT a code bug. Re-export fresh cookies (full export incl. google.com auth "
                             "cookies, not youtube.com-only) and update Render's cookies.txt Secret File. "

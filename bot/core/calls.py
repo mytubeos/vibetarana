@@ -188,8 +188,23 @@ _COOKIE_AUTH_ERROR_MARKER = "Sign in to confirm"
 def patch_ytdlp_timeout() -> None:
     """Call once at startup, after setup_cookies(). Replaces YtDlp.extract
     with a copy of itself that waits YTDLP_SUBPROCESS_TIMEOUT_SECONDS instead
-    of py-tgcalls' hardcoded 20, and tries the "tv_embedded"+"android" player
-    clients before falling back to "web"."""
+    of py-tgcalls' hardcoded 20.
+
+    Deliberately back to a single "web" attempt, no "android"/"tv_embedded"
+    speed trick. Both were measured working locally (WSL2, residential IP —
+    android ~6s, tv_embedded ~5-7s at 720p) but Render's live logs
+    (2026-08-04) showed "tv_embedded+android extraction failed, retrying
+    with web" for every single video over a ~15min window with zero
+    exceptions — a 100% failure rate that never showed up locally. Most
+    likely YouTube specifically discriminates against these
+    JS-challenge-skipping clients by IP reputation, punishing datacenter
+    ranges harder than residential ones — exactly the kind of thing this
+    codebase's own README already warned "if playback works locally but
+    fails on the VPS" about, just for a client trick instead of cookies.
+    Net effect on Render: every extraction paid for a failing first attempt
+    AND the slow web fallback — slower than just using web alone. If
+    revisiting this, verify against a real Render deploy, not just a local
+    residential-IP test — that gap is exactly what bit this once already."""
 
     async def patched_extract(
         link: Optional[str],
@@ -200,41 +215,18 @@ def patch_ytdlp_timeout() -> None:
             return None, None
         try:
             try:
-                # The "web" client (yt-dlp's default) is what needs the slow
-                # Deno JS-challenge in the first place; "tv_embedded" and
-                # "android" both skip it. Measured live (2026-08-04): under
-                # YouTube's current SABR-streaming restrictions (see the
-                # cookie-check comment below's neighbor — a separate, active
-                # YouTube-side rollout), "android" alone only had access to
-                # the old 360p-capped itag 18 fallback format for every video
-                # tested; "tv_embedded" got 720p on the same videos, for the
-                # same ~5s cost. Listing both together here cost only ~6s
-                # (not double — unlike the android+web combo, neither of
-                # these needs the JS challenge, so querying both is just two
-                # cheap API calls), so this tries them together first and
-                # only pays for a separate, slower web attempt on the
-                # (uncommon) videos neither can resolve at all — same
-                # reliability as before, better common-case quality, no
-                # meaningful speed cost (worth re-checking if extraction
-                # quality/time regresses after a yt-dlp upgrade — YouTube's
-                # SABR rollout and yt-dlp's support for it are both moving
-                # targets right now).
-                return await _run_ytdlp_extract(link, video_parameters, add_commands, "tv_embedded,android")
-            except YtDlpError as first_attempt_error:
-                logger.info("tv_embedded+android extraction failed for %s, retrying with web", link)
-                try:
-                    return await _run_ytdlp_extract(link, video_parameters, add_commands, "web")
-                except YtDlpError as web_error:
-                    if _COOKIE_AUTH_ERROR_MARKER in str(first_attempt_error) or _COOKIE_AUTH_ERROR_MARKER in str(web_error):
-                        logger.warning(
-                            "COOKIE AUTH FAILURE: YouTube rejected every player client for %s with "
-                            "'Sign in to confirm you're not a bot' — this means cookies.txt is stale/invalid, "
-                            "NOT a code bug. Re-export fresh cookies (full export incl. google.com auth "
-                            "cookies, not youtube.com-only) and update Render's cookies.txt Secret File. "
-                            "See README's 'Known operational risks'.",
-                            link,
-                        )
-                    raise
+                return await _run_ytdlp_extract(link, video_parameters, add_commands, "web")
+            except YtDlpError as error:
+                if _COOKIE_AUTH_ERROR_MARKER in str(error):
+                    logger.warning(
+                        "COOKIE AUTH FAILURE: YouTube rejected the web player client for %s with "
+                        "'Sign in to confirm you're not a bot' — this means cookies.txt is stale/invalid, "
+                        "NOT a code bug. Re-export fresh cookies (full export incl. google.com auth "
+                        "cookies, not youtube.com-only) and update Render's cookies.txt Secret File. "
+                        "See README's 'Known operational risks'.",
+                        link,
+                    )
+                raise
         except FileNotFoundError:
             raise YtDlpError("yt-dlp is not installed on your system")
 
@@ -330,17 +322,28 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
     (deleted video, region-blocked, unsupported format, network issue) —
     never raises, so callers can react (try the next track, report an
     error) instead of leaving the chat silently wedged."""
-    # Three tiers, cheapest first: this chat's own prefetch (already
-    # resolved in the background for exactly this track), the bot-wide
-    # cross-chat cache (someone resolved this same video recently), and only
-    # then a fresh, explicit extraction — which also populates the
-    # bot-wide cache so the *next* request for this song, in any chat,
-    # can hit it. Resolving explicitly here (rather than handing
+    # Four tiers, cheapest first: this chat's own prefetch if it already
+    # finished, an in-flight prefetch for the same track (await it instead
+    # of starting a second, fully redundant yt-dlp subprocess for the same
+    # video — this used to not happen: a prefetch still running when the
+    # track was needed meant _play_track raced its own separate extraction
+    # against it, paying full extraction cost twice for nothing), the
+    # bot-wide cross-chat cache (someone resolved this same video recently),
+    # and only then a fresh, explicit extraction — which also populates the
+    # bot-wide cache so the *next* request for this song, in any chat, can
+    # hit it. Resolving explicitly here (rather than handing
     # MediaStream(track.link, ...) to py-tgcalls and letting it call
     # YtDlp.extract internally, as before) is what makes that caching
     # possible — same underlying (patched) extractor either way.
-    urls = _prefetch_cache.pop(id(track), None) or _cached_urls_get(track.link)
+    urls = _prefetch_cache.pop(id(track), None)
     try:
+        if urls is None:
+            pending = _prefetch_tasks.get(id(track))
+            if pending is not None:
+                await pending
+                urls = _prefetch_cache.pop(id(track), None)
+        if urls is None:
+            urls = _cached_urls_get(track.link)
         if urls is None:
             urls = await YtDlp.extract(track.link, _DEFAULT_VIDEO_PARAMETERS, None)
             _cached_urls_put(track.link, urls)

@@ -69,6 +69,22 @@ class AssistantPool:
             index = len(self.assistants)
             self.assistants.append(Assistant(index=index, client=client, call_py=call_py))
             logger.info(f"Assistant {index} (config slot {i}) started as @{me.username or me.id}")
+
+            # Pyrogram can't create/join a voice chat in a group it hasn't
+            # resolved a peer (access_hash) for — confirmed live: an
+            # assistant added to a group whose membership it never got a
+            # live update for fails with ChannelInvalid on the very first
+            # /play there, even though the group appears in its dialog list.
+            # get_dialogs() forces a fetch that populates the peer cache for
+            # every chat this account is currently in, so this can only ever
+            # help. bot/core/calls.py's _play_track() also does this
+            # lazily, on-demand, for a group added to the assistant *after*
+            # this startup pass already ran.
+            try:
+                async for _ in client.get_dialogs():
+                    pass
+            except Exception:
+                logger.warning("Failed to prime dialog/peer cache for assistant %d", index, exc_info=True)
         if not self.assistants:
             raise RuntimeError("No assistants started — check ASSISTANT_SESSIONS in .env")
 

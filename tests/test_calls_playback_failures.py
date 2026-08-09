@@ -135,8 +135,9 @@ def test_join_and_play_releases_pool_slot_when_playback_fails(monkeypatch):
 
     monkeypatch.setattr(calls, "_play_track", fake_play_track)
 
-    result = asyncio.run(calls.join_and_play(1, make_track()))
-    assert result is None
+    assistant, reason = asyncio.run(calls.join_and_play(1, make_track()))
+    assert assistant is None
+    assert reason == "failed"
     assert released == [1]
 
 
@@ -155,6 +156,7 @@ def test_join_and_play_returns_assistant_on_success(monkeypatch):
 
     monkeypatch.setattr(calls, "_play_track", fake_play_track)
 
-    result = asyncio.run(calls.join_and_play(1, make_track()))
-    assert result is fake_assistant
+    assistant, reason = asyncio.run(calls.join_and_play(1, make_track()))
+    assert assistant is fake_assistant
+    assert reason is None
     assert released == []

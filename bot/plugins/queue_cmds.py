@@ -129,7 +129,7 @@ async def import_cmd(client: Client, message: Message) -> None:
     if was_idle:
         next_track = queues.get(chat_id).current
         if next_track is not None:
-            assistant = await calls.join_and_play(chat_id, next_track)
+            assistant, reason = await calls.join_and_play(chat_id, next_track)
             if assistant is None:
                 # Mirror play.py's rollback: leaving imported tracks queued
                 # with no assistant playing them would make `current` look
@@ -137,10 +137,15 @@ async def import_cmd(client: Client, message: Message) -> None:
                 # /play, /skip reporting a track that never actually streams)
                 # even though nothing is — so discard the batch instead.
                 queues.clear(chat_id)
-                await message.reply_text(
-                    "All assistants are busy right now — try again in a bit, or ask "
-                    "the bot owner to add another assistant account. Nothing was imported."
-                )
+                if reason == "busy":
+                    await message.reply_text(
+                        "All assistants are busy right now — try again in a bit, or ask "
+                        "the bot owner to add another assistant account. Nothing was imported."
+                    )
+                else:
+                    await message.reply_text(
+                        "The first imported track failed to load — try again. Nothing was imported."
+                    )
                 return
 
     await message.reply_text(f"📥 Imported {added} track(s).")

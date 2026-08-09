@@ -57,17 +57,13 @@ async def _resolve_and_queue(message: Message, *, video: bool) -> None:
     # patch_ytdlp_timeout), so say so here instead of leaving "Searching for
     # ..." on screen with nothing happening, which reads as stuck/broken.
     await status.edit_text(f"🔗 Loading stream for {track.title}... (up to 20s)", parse_mode=ParseMode.DISABLED)
-    assistant = await calls.join_and_play(chat_id, track)
+    assistant, reason = await calls.join_and_play(chat_id, track)
     if assistant is None:
         queues.clear(chat_id)
-        # join_and_play() returns None for two different reasons — every
-        # assistant busy, or the track itself failed to play (deleted/
-        # region-blocked/unsupported) — it doesn't distinguish, so this
-        # message has to stay accurate for both.
-        await status.edit_text(
-            "Couldn't start playback — either all assistants are busy right now, "
-            "or that track failed to load. Try again in a bit or pick a different track."
-        )
+        if reason == "busy":
+            await status.edit_text("⏳ All assistants are busy right now — try again in a bit.")
+        else:
+            await status.edit_text("⚠️ That track failed to load — try again or pick a different track.")
         return
 
     # The final card gets the track's thumbnail (reply_track_card sends a
@@ -123,13 +119,13 @@ async def _resolve_and_force_play(message: Message, *, video: bool) -> None:
 
     await status.edit_text(f"🔗 Loading stream for {track.title}... (up to 20s)", parse_mode=ParseMode.DISABLED)
     queues.force_add(chat_id, track)
-    assistant = await calls.force_play(chat_id, track)
+    assistant, reason = await calls.force_play(chat_id, track)
     if assistant is None:
         queues.clear(chat_id)
-        await status.edit_text(
-            "Couldn't start playback — either all assistants are busy right now, "
-            "or that track failed to load. Try again in a bit or pick a different track."
-        )
+        if reason == "busy":
+            await status.edit_text("⏳ All assistants are busy right now — try again in a bit.")
+        else:
+            await status.edit_text("⚠️ That track failed to load — try again or pick a different track.")
         return
 
     try:

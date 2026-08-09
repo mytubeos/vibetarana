@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
+from pyrogram.errors import ChannelInvalid
 from pytgcalls import filters as fl
 from pytgcalls.exceptions import YtDlpError
 from pytgcalls.ffmpeg import cleanup_commands
@@ -433,7 +434,23 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
         # skips straight past re-extracting and uses them as-is.
         video_url, audio_url = urls
         stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track))
-        await assistant.call_py.play(chat_id, stream)
+        try:
+            await assistant.call_py.play(chat_id, stream)
+        except ChannelInvalid:
+            # The assistant's Pyrogram session hasn't resolved this chat's
+            # peer (access_hash) yet — confirmed live: happens when a group
+            # is added to the assistant after AssistantPool.start()'s own
+            # get_dialogs() pass already ran, and no live update has
+            # reached this session for it since. get_dialogs() forces a
+            # fresh fetch, which populates it; retrying once after that
+            # recovers without needing a full bot restart.
+            logger.info(
+                "Chat %d not resolved for assistant %d yet, refreshing dialogs and retrying",
+                chat_id, assistant.index,
+            )
+            async for _ in assistant.client.get_dialogs():
+                pass
+            await assistant.call_py.play(chat_id, stream)
     except Exception:
         logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
         return False
@@ -519,36 +536,39 @@ async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
     await _schedule_auto_leave(chat_id)
 
 
-async def join_and_play(chat_id: int, track: Track) -> Assistant | None:
+async def join_and_play(chat_id: int, track: Track) -> tuple[Assistant | None, str | None]:
     """Add-and-play entry point used by /play (and /import when idle).
-    Returns the assistant if playback actually started, or None if every
-    assistant was at capacity OR the track failed to play (pool slot is
-    released either way, so a retry can get a fresh assignment)."""
+    Returns (assistant, None) if playback actually started. On failure,
+    (None, "busy") if every assistant was at capacity or (None, "failed")
+    if the track itself didn't play — distinct so callers can tell the user
+    which one actually happened instead of always hedging both (pool slot
+    is released either way, so a retry can get a fresh assignment)."""
     assistant = await pool.get_or_assign(chat_id)
     if assistant is None:
-        return None
+        return None, "busy"
     _cancel_pending_leave(chat_id)
     if not await _play_track(assistant, chat_id, track):
         pool.release(chat_id)
-        return None
-    return assistant
+        return None, "failed"
+    return assistant, None
 
 
-async def force_play(chat_id: int, track: Track) -> Assistant | None:
+async def force_play(chat_id: int, track: Track) -> tuple[Assistant | None, str | None]:
     """Entry point for /playforce and /vplayforce — immediately hot-swaps
     the chat's stream to `track`, same as join_and_play() if the chat was
     idle, but if it already has an assistant this reuses it directly
     (re-calling .play() on a live call swaps the stream in place rather
     than leaving/rejoining, same mechanism seek() relies on) instead of
     going through pool assignment again. Caller is responsible for having
-    already put `track` at queue index 0 (queues.force_add)."""
+    already put `track` at queue index 0 (queues.force_add). Same
+    (assistant, reason) contract as join_and_play()."""
     assistant = _get_healthy_assistant(chat_id)
     if assistant is None:
         return await join_and_play(chat_id, track)
     _cancel_pending_leave(chat_id)
     if not await _play_track(assistant, chat_id, track):
-        return None
-    return assistant
+        return None, "failed"
+    return assistant, None
 
 
 async def pause(chat_id: int) -> bool:

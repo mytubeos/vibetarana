@@ -1,11 +1,12 @@
-"""Playback control commands: /pause /resume /skip /stop /seek, plus the
-inline-button equivalents attached to "now playing" messages."""
+"""Playback control commands: /pause /resume /skip /stop /seek /stopall, plus
+the inline-button equivalents attached to "now playing" messages."""
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import CallbackQuery, Message
 
 from bot.core import calls
-from bot.core.decorators import admin_filter, user_is_admin_or_owner
+from bot.core.assistants import pool
+from bot.core.decorators import admin_filter, owner_filter, user_is_admin_or_owner
 from bot.core.queue import queues
 from bot.utils.formatting import edit_card_status, edit_track_card, playback_keyboard, reply_track_card, track_block
 
@@ -37,6 +38,22 @@ async def skip_cmd(_: Client, message: Message) -> None:
 async def stop_cmd(_: Client, message: Message) -> None:
     ok = await calls.stop(message.chat.id)
     await message.reply_text("⏹ Stopped and left the voice chat." if ok else "Nothing was playing.")
+
+
+@Client.on_message(filters.command("stopall") & owner_filter)
+async def stopall_cmd(_: Client, message: Message) -> None:
+    """Owner-only, works from any chat (DM included) — releases every
+    assistant from every chat it's currently assigned to in one shot.
+    For when a group's stuck assignment (or a genuine "every assistant is
+    actually busy elsewhere") blocks /play everywhere and hunting down
+    each individual group to run /stop in isn't practical."""
+    chat_ids = [chat_id for assistant in pool.assistants for chat_id in list(assistant.chats)]
+    if not chat_ids:
+        await message.reply_text("Nothing to stop — no assistant is currently assigned anywhere.")
+        return
+    for chat_id in chat_ids:
+        await calls.stop(chat_id)
+    await message.reply_text(f"⏹ Stopped and released {len(chat_ids)} chat(s).")
 
 
 @Client.on_message(filters.command("player") & filters.group & admin_filter)

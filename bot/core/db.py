@@ -1,9 +1,10 @@
 """MongoDB wiring — actually used here, unlike TG where MONGO_URI was required
-but never connected. Owns two Phase-1 collections: `sudo_users` (a persisted
-allow-list beyond the single OWNER_ID env var) and `chat_settings` (a minimal
+but never connected. Owns four collections: `sudo_users` (a persisted
+allow-list beyond the single OWNER_ID env var), `chat_settings` (a minimal
 per-chat scaffold, write-through only in Phase 1 — nothing reads it back yet;
 bot/core/queue.py stays pure in-memory until restart-persistence lands in a
-later phase).
+later phase), and `resolved_url_cache` + `play_counts` (added 2026-08-04 —
+bot/core/calls.py's cross-restart cache-warming; see its own docstrings).
 
 AsyncMongoClient (not motor — deprecated) must be constructed inside a running
 event loop, so `connect()` is called from main.py, not at import time.
@@ -75,3 +76,37 @@ async def get_chat_settings(chat_id: int) -> dict:
 
 async def set_chat_setting(chat_id: int, **fields: object) -> None:
     await db.chat_settings.update_one({"_id": chat_id}, {"$set": fields}, upsert=True)
+
+
+async def get_resolved_url_cache() -> dict[str, tuple[str, str, float]]:
+    """Every stored resolved-URL cache entry, keyed by YouTube video ID —
+    bot/core/calls.py reads this once at startup to restore its in-memory
+    cache across a restart (otherwise every redeploy throws away every
+    recently-resolved song). Doesn't filter by TTL — that's calls.py's
+    policy to own, not this module's; the result may include stale entries
+    the caller should skip."""
+    result: dict[str, tuple[str, str, float]] = {}
+    async for doc in db.resolved_url_cache.find({}):
+        result[doc["_id"]] = (doc["video_url"], doc["audio_url"], doc["resolved_at"])
+    return result
+
+
+async def save_resolved_url(video_id: str, video_url: str, audio_url: str, resolved_at: float) -> None:
+    await db.resolved_url_cache.update_one(
+        {"_id": video_id},
+        {"$set": {"video_url": video_url, "audio_url": audio_url, "resolved_at": resolved_at}},
+        upsert=True,
+    )
+
+
+async def record_play(video_id: str) -> None:
+    """Increments a per-video play counter — feeds calls.py's pre-warming
+    loop, which keeps the most-played songs' cache entries perpetually
+    fresh instead of only ever caching reactively after someone waits
+    through a cold extraction."""
+    await db.play_counts.update_one({"_id": video_id}, {"$inc": {"count": 1}}, upsert=True)
+
+
+async def get_top_played_video_ids(limit: int) -> list[str]:
+    cursor = db.play_counts.find({}, {"_id": 1}).sort("count", -1).limit(limit)
+    return [doc["_id"] async for doc in cursor]

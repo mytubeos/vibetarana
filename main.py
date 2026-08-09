@@ -10,7 +10,9 @@ from bot.core import db
 from bot.core.assistants import pool
 from bot.core.calls import (
     patch_ytdlp_timeout,
+    prewarm_popular_songs_loop,
     register_all_handlers,
+    restore_resolved_url_cache,
     setup_cookies,
     stale_assignment_check_loop,
 )
@@ -34,6 +36,7 @@ async def main() -> None:
     keepalive_runner = await start_keepalive_server()
     try:
         await db.connect()
+        await restore_resolved_url_cache()
         try:
             await bot.start()
             try:
@@ -45,6 +48,7 @@ async def main() -> None:
                     register_all_handlers()
                     asyncio.create_task(pool.health_check_loop())
                     asyncio.create_task(stale_assignment_check_loop())
+                    asyncio.create_task(prewarm_popular_songs_loop())
 
                     logger.info(
                         "Ready — %d assistant(s) online, %d chat(s) each",

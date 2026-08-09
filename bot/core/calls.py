@@ -19,6 +19,7 @@ from pytgcalls.types.raw.video_parameters import VideoParameters
 from pytgcalls.types.stream.video_quality import VideoQuality
 from pytgcalls.ytdlp import YtDlp
 
+from bot.core import db
 from bot.core.assistants import Assistant, pool
 from bot.core.client import bot
 from bot.core.queue import Track, queues
@@ -78,7 +79,16 @@ _PREFETCH_CACHE_MAX_ENTRIES = 20
 # link the player rejects mid-playback.
 _VIDEO_ID_RE = re.compile(r"(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})")
 _RESOLVED_URL_CACHE_TTL_SECONDS = 4 * 3600
-_RESOLVED_URL_CACHE_MAX_ENTRIES = 200
+# Bumped from 200 (2026-08-04) — each entry is just two URL strings plus a
+# timestamp, a few KB at most, so even a few thousand entries costs single-
+# digit MB. Render's free-tier memory isn't remotely the constraint here;
+# the TTL above already bounds how long anything sticks around.
+_RESOLVED_URL_CACHE_MAX_ENTRIES = 3000
+# time.time() (wall-clock), not time.monotonic() — these entries are
+# persisted to MongoDB (see restore_resolved_url_cache() below) so a
+# redeploy doesn't throw the cache away, and monotonic's zero point resets
+# on every process start, making a value saved by one process meaningless
+# to compare against time.monotonic() in the next.
 _resolved_url_cache: dict[str, tuple[str, str, float]] = {}
 
 
@@ -90,22 +100,93 @@ def _cached_urls_get(link: str) -> tuple[str, str] | None:
     if entry is None:
         return None
     video_url, audio_url, resolved_at = entry
-    if time.monotonic() - resolved_at > _RESOLVED_URL_CACHE_TTL_SECONDS:
+    if time.time() - resolved_at > _RESOLVED_URL_CACHE_TTL_SECONDS:
         del _resolved_url_cache[match.group(1)]
         return None
     return video_url, audio_url
 
 
-def _cached_urls_put(link: str, urls: tuple[str, str]) -> None:
+async def _cached_urls_put(link: str, urls: tuple[str, str]) -> None:
     match = _VIDEO_ID_RE.search(link)
     if match is None:
         # Non-YouTube link (e.g. bot/platforms/direct_link.py) — no stable
         # ID to key a cross-chat cache on, so this is a silent no-op rather
         # than a cache that can never be a hit.
         return
-    _resolved_url_cache[match.group(1)] = (*urls, time.monotonic())
+    video_id = match.group(1)
+    resolved_at = time.time()
+    _resolved_url_cache[video_id] = (*urls, resolved_at)
     while len(_resolved_url_cache) > _RESOLVED_URL_CACHE_MAX_ENTRIES:
         _resolved_url_cache.pop(next(iter(_resolved_url_cache)))
+    try:
+        await db.save_resolved_url(video_id, urls[0], urls[1], resolved_at)
+    except Exception:
+        # Best-effort durability — an in-memory-only cache entry still
+        # works fine for the rest of this process's life, it just won't
+        # survive the next restart. Never let a Mongo hiccup break playback.
+        logger.warning("Failed to persist resolved-URL cache entry for %s", video_id, exc_info=True)
+
+
+async def restore_resolved_url_cache() -> None:
+    """Call once at startup, after db.connect(). Repopulates the in-memory
+    resolved-URL cache from MongoDB so a redeploy doesn't throw away every
+    recently-resolved song's cache-hit — otherwise every restart (frequent
+    during active development, and Render's own occasional restarts) resets
+    this to fully cold. Skips anything already past its TTL; a googlevideo
+    URL from hours ago is worthless regardless of how it got here."""
+    try:
+        stored = await db.get_resolved_url_cache()
+    except Exception:
+        logger.warning("Failed to restore resolved-URL cache from MongoDB", exc_info=True)
+        return
+    now = time.time()
+    for video_id, (video_url, audio_url, resolved_at) in stored.items():
+        if now - resolved_at > _RESOLVED_URL_CACHE_TTL_SECONDS:
+            continue
+        _resolved_url_cache[video_id] = (video_url, audio_url, resolved_at)
+    if _resolved_url_cache:
+        logger.info("Restored %d cached resolved URL(s) from MongoDB", len(_resolved_url_cache))
+
+
+async def _record_play(video_id: str) -> None:
+    try:
+        await db.record_play(video_id)
+    except Exception:
+        logger.warning("Failed to record play count for %s", video_id, exc_info=True)
+
+
+# How many of the most-played songs prewarm_popular_songs_loop() keeps
+# perpetually fresh. Deliberately modest — each one that's actually gone
+# cold costs a real extraction (~15-20s of subprocess/network work), and
+# this runs unattended on Render's shared free-tier CPU; not worth hammering
+# it for long-tail songs that were only ever played once anyway.
+_PREWARM_TOP_N = 10
+
+
+async def prewarm_popular_songs_loop(interval_seconds: int = 1800) -> None:
+    """Periodically re-resolves the most-played songs (tracked via
+    db.record_play(), fired from _play_track() on every successful play) so
+    a request for one of them is always a cache hit instead of only ever
+    caching reactively after someone already waited through a cold
+    extraction once. Skips anything still within its TTL — cheap, since
+    that's the common case once a song's actually warm."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            top_video_ids = await db.get_top_played_video_ids(_PREWARM_TOP_N)
+        except Exception:
+            logger.warning("Failed to fetch top-played video IDs for pre-warming", exc_info=True)
+            continue
+        for video_id in top_video_ids:
+            link = f"https://www.youtube.com/watch?v={video_id}"
+            if _cached_urls_get(link) is not None:
+                continue  # still warm, nothing to do
+            try:
+                urls = await YtDlp.extract(link, _DEFAULT_VIDEO_PARAMETERS, None)
+            except Exception:
+                logger.warning("Pre-warm extraction failed for %s", video_id, exc_info=True)
+                continue
+            await _cached_urls_put(link, urls)
 
 
 # Bumped from HD_720p — pytgcalls supports up to UHD_4K, but Render's free
@@ -303,7 +384,7 @@ def schedule_prefetch(chat_id: int) -> None:
             logger.warning("Prefetch failed for %r", next_track.title, exc_info=True)
         else:
             _prefetch_cache[key] = urls
-            _cached_urls_put(next_track.link, urls)
+            await _cached_urls_put(next_track.link, urls)
             # A prefetched track that's cleared/shuffled/stopped before its
             # turn leaves an orphaned entry here forever (nothing else
             # references it to know it's safe to drop) — bound it rather
@@ -346,7 +427,7 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
             urls = _cached_urls_get(track.link)
         if urls is None:
             urls = await YtDlp.extract(track.link, _DEFAULT_VIDEO_PARAMETERS, None)
-            _cached_urls_put(track.link, urls)
+            await _cached_urls_put(track.link, urls)
         # Already googlevideo.com URLs, not youtube.com ones — pytgcalls' own
         # is_valid() check (see ytdlp.py) fails on them, so check_stream()
         # skips straight past re-extracting and uses them as-is.
@@ -358,6 +439,11 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
         return False
     queues.get(chat_id).is_paused = False
     schedule_prefetch(chat_id)
+    # Fire-and-forget — feeds prewarm_popular_songs_loop()'s "most-played"
+    # ranking, never worth delaying the now-playing response for.
+    match = _VIDEO_ID_RE.search(track.link)
+    if match:
+        asyncio.create_task(_record_play(match.group(1)))
     return True
 
 

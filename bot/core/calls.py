@@ -21,6 +21,9 @@ from pytgcalls.types.stream.video_quality import VideoQuality
 from pytgcalls.ytdlp import YtDlp
 
 from bot.core import db
+from bot.core.session import get_session, operation, cancel_pending
+from bot.core.media import youtube_id, local_media, validate_track
+from config import settings
 from bot.core.assistants import Assistant, pool
 from bot.core.client import bot
 from bot.core.queue import Track, queues
@@ -67,8 +70,12 @@ _pending_leave_tasks: dict[int, asyncio.Task] = {}
 # its short lifetime in one chat's queue. Entries are popped as soon as
 # they're consumed; a prefetched track that never gets played (cleared/
 # shuffled/stopped first) instead ages out via _PREFETCH_CACHE_MAX_ENTRIES.
-_prefetch_cache: dict[int, tuple[str, str]] = {}
-_prefetch_tasks: dict[int, asyncio.Task] = {}
+_prefetch_cache: dict[tuple[str, bool], tuple[tuple[str, str], float]] = {}
+_local_paths: dict[int, Path] = {}
+_extract_slots = asyncio.Semaphore(settings.extraction_concurrency)
+_inflight: dict[tuple[str, bool], asyncio.Task] = {}
+_audio_url_cache: dict[str, tuple[tuple[str, str], float]] = {}
+_prefetch_tasks: dict[tuple[str, bool], asyncio.Task] = {}
 _PREFETCH_CACHE_MAX_ENTRIES = 20
 
 # Bot-wide companion to _prefetch_cache above: that one is per-chat and
@@ -94,7 +101,8 @@ _resolved_url_cache: dict[str, tuple[str, str, float]] = {}
 
 
 def _cached_urls_get(link: str) -> tuple[str, str] | None:
-    match = _VIDEO_ID_RE.search(link)
+    video_id = youtube_id(link)
+    match = _VIDEO_ID_RE.search(f"https://youtube.com/watch?v={video_id}") if video_id else None
     if match is None:
         return None
     entry = _resolved_url_cache.get(match.group(1))
@@ -108,7 +116,8 @@ def _cached_urls_get(link: str) -> tuple[str, str] | None:
 
 
 async def _cached_urls_put(link: str, urls: tuple[str, str]) -> None:
-    match = _VIDEO_ID_RE.search(link)
+    video_id = youtube_id(link)
+    match = _VIDEO_ID_RE.search(f"https://youtube.com/watch?v={video_id}") if video_id else None
     if match is None:
         # Non-YouTube link (e.g. bot/platforms/direct_link.py) — no stable
         # ID to key a cross-chat cache on, so this is a silent no-op rather
@@ -141,7 +150,7 @@ async def restore_resolved_url_cache() -> None:
         logger.warning("Failed to restore resolved-URL cache from MongoDB", exc_info=True)
         return
     now = time.time()
-    for video_id, (video_url, audio_url, resolved_at) in stored.items():
+    for video_id, (video_url, audio_url, resolved_at) in list(stored.items())[-_RESOLVED_URL_CACHE_MAX_ENTRIES:]:
         if now - resolved_at > _RESOLVED_URL_CACHE_TTL_SECONDS:
             continue
         _resolved_url_cache[video_id] = (video_url, audio_url, resolved_at)
@@ -183,7 +192,7 @@ async def prewarm_popular_songs_loop(interval_seconds: int = 1800) -> None:
             if _cached_urls_get(link) is not None:
                 continue  # still warm, nothing to do
             try:
-                urls = await YtDlp.extract(link, _DEFAULT_VIDEO_PARAMETERS, None)
+                urls = await extract_urls(link, True)
             except Exception:
                 logger.warning("Pre-warm extraction failed for %s", video_id, exc_info=True)
                 continue
@@ -231,14 +240,15 @@ async def _run_ytdlp_extract(
         "yt-dlp",
         "-g",
         "-f",
-        'bestvideo[vcodec~="(vp09|avc1)"]+m4a/best',
+        ('bestaudio/best' if add_commands == '__audio__' else 'bestvideo[vcodec~="(vp09|avc1)"]+m4a/best'),
+        '--no-playlist',
         "-S",
         f"res:{min(video_parameters.width, video_parameters.height)}",
         "--extractor-args",
         f"youtube:player_client={player_client}",
         "--no-warnings",
     ]
-    if add_commands:
+    if add_commands and add_commands != "__audio__":
         commands += await cleanup_commands(shlex.split(add_commands), "yt-dlp", ["-f", "-g", "--no-warnings"])
     commands.append(link)
     proc = await asyncio.create_subprocess_exec(
@@ -246,11 +256,13 @@ async def _run_ytdlp_extract(
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), YTDLP_SUBPROCESS_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        proc.terminate()
-        raise YtDlpError("yt-dlp process timeout")
-    if stderr:
-        raise YtDlpError(stderr.decode())
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        raise
+    if proc.returncode:
+        raise YtDlpError(stderr.decode() or "yt-dlp extraction failed")
     data = stdout.decode().strip().split("\n")
     if data and data[0]:
         return data[0], data[1] if len(data) >= 2 else data[0]
@@ -363,105 +375,136 @@ def _get_healthy_assistant(chat_id: int) -> Assistant | None:
     return assistant
 
 
+async def extract_urls(link: str, video: bool) -> tuple[str, str]:
+    video_id = youtube_id(link)
+    if video_id is None:
+        raise ValueError("Only canonical YouTube links go to the extractor.")
+    canonical = f"https://www.youtube.com/watch?v={video_id}"
+    key = (canonical, video)
+    task = _inflight.get(key)
+    if task is None:
+        async def extract():
+            async with asyncio.timeout(90):
+                async with _extract_slots:
+                    return await YtDlp.extract(canonical, _DEFAULT_VIDEO_PARAMETERS, None if video else '__audio__')
+        task = asyncio.create_task(extract())
+        _inflight[key] = task
+        def finished(done):
+            if _inflight.get(key) is done:
+                _inflight.pop(key, None)
+            if not done.cancelled():
+                done.exception()  # retrieve failures even if all waiters stopped
+        task.add_done_callback(finished)
+    return await asyncio.shield(task)
+
+
 def schedule_prefetch(chat_id: int) -> None:
-    """Kick off a background resolve of the queue's next track (index 1 —
-    index 0 is whatever's currently playing), if one exists and isn't
-    already cached/in flight. Call after anything that could change what
-    "next" is: a track starts playing, a new one is added to a queue that's
-    already playing, etc. Safe to call speculatively — cheap no-op if
-    there's nothing to prefetch or it's already covered."""
     state = queues.get(chat_id)
     if len(state.queue) < 2:
         return
-    next_track = state.queue[1]
-    key = id(next_track)
+    track = state.queue[1]
+    if not youtube_id(track.link):
+        return
+    key = (track.link, track.video)
     if key in _prefetch_cache or key in _prefetch_tasks:
         return
-
-    async def _prefetch() -> None:
+    async def prefetch():
         try:
-            urls = await YtDlp.extract(next_track.link, _DEFAULT_VIDEO_PARAMETERS, None)
-        except Exception:
-            logger.warning("Prefetch failed for %r", next_track.title, exc_info=True)
-        else:
-            _prefetch_cache[key] = urls
-            await _cached_urls_put(next_track.link, urls)
-            # A prefetched track that's cleared/shuffled/stopped before its
-            # turn leaves an orphaned entry here forever (nothing else
-            # references it to know it's safe to drop) — bound it rather
-            # than track every such path, so months of unattended uptime
-            # can't accumulate unbounded entries.
+            urls = await extract_urls(track.link, track.video)
+            _prefetch_cache[key] = (urls, time.monotonic())
+            if track.video:
+                await _cached_urls_put(track.link, urls)
             while len(_prefetch_cache) > _PREFETCH_CACHE_MAX_ENTRIES:
                 _prefetch_cache.pop(next(iter(_prefetch_cache)))
+        except Exception:
+            logger.info("Prefetch failed; foreground playback will retry")
         finally:
             _prefetch_tasks.pop(key, None)
+    _prefetch_tasks[key] = asyncio.create_task(prefetch())
 
-    _prefetch_tasks[key] = asyncio.create_task(_prefetch())
 
-
-async def _play_track(assistant: Assistant, chat_id: int, track: Track) -> bool:
-    """Returns True if playback started. False on any yt-dlp/ffmpeg failure
-    (deleted video, region-blocked, unsupported format, network issue) —
-    never raises, so callers can react (try the next track, report an
-    error) instead of leaving the chat silently wedged."""
-    # Four tiers, cheapest first: this chat's own prefetch if it already
-    # finished, an in-flight prefetch for the same track (await it instead
-    # of starting a second, fully redundant yt-dlp subprocess for the same
-    # video — this used to not happen: a prefetch still running when the
-    # track was needed meant _play_track raced its own separate extraction
-    # against it, paying full extraction cost twice for nothing), the
-    # bot-wide cross-chat cache (someone resolved this same video recently),
-    # and only then a fresh, explicit extraction — which also populates the
-    # bot-wide cache so the *next* request for this song, in any chat, can
-    # hit it. Resolving explicitly here (rather than handing
-    # MediaStream(track.link, ...) to py-tgcalls and letting it call
-    # YtDlp.extract internally, as before) is what makes that caching
-    # possible — same underlying (patched) extractor either way.
-    urls = _prefetch_cache.pop(id(track), None)
+async def _play_track(assistant: Assistant, chat_id: int, track: Track, *, offset: int = 0) -> bool:
+    session = get_session(chat_id)
+    revision = session.revision
+    local_path = None
     try:
-        if urls is None:
-            pending = _prefetch_tasks.get(id(track))
-            if pending is not None:
-                await pending
-                urls = _prefetch_cache.pop(id(track), None)
-        if urls is None:
-            urls = _cached_urls_get(track.link)
-        if urls is None:
-            urls = await YtDlp.extract(track.link, _DEFAULT_VIDEO_PARAMETERS, None)
-            await _cached_urls_put(track.link, urls)
-        # Already googlevideo.com URLs, not youtube.com ones — pytgcalls' own
-        # is_valid() check (see ytdlp.py) fails on them, so check_stream()
-        # skips straight past re-extracting and uses them as-is.
-        video_url, audio_url = urls
-        stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track))
-        try:
-            await assistant.call_py.play(chat_id, stream)
-        except ChannelInvalid:
-            # The assistant's Pyrogram session hasn't resolved this chat's
-            # peer (access_hash) yet — confirmed live: happens when a group
-            # is added to the assistant after AssistantPool.start()'s own
-            # get_dialogs() pass already ran, and no live update has
-            # reached this session for it since. get_dialogs() forces a
-            # fresh fetch, which populates it; retrying once after that
-            # recovers without needing a full bot restart.
-            logger.info(
-                "Chat %d not resolved for assistant %d yet, refreshing dialogs and retrying",
-                chat_id, assistant.index,
-            )
-            async for _ in assistant.client.get_dialogs():
-                pass
-            await assistant.call_py.play(chat_id, stream)
+        validate_track(track)
+        if youtube_id(track.link):
+            cached = _prefetch_cache.pop((track.link, track.video), None)
+            urls = cached[0] if cached and time.monotonic() - cached[1] < 600 else None
+            # Audio and video have different format requirements.
+            if urls is None and track.video:
+                urls = _cached_urls_get(track.link)
+            elif urls is None:
+                audio_entry = _audio_url_cache.get(youtube_id(track.link))
+                if audio_entry and time.monotonic() - audio_entry[1] < 600:
+                    urls = audio_entry[0]
+            was_cached = urls is not None
+            if urls is None:
+                urls = await extract_urls(track.link, track.video)
+        else:
+            local_path = await local_media(track)
+            urls = (str(local_path), str(local_path))
+            was_cached = False
+        for attempt in range(2):
+            if revision != session.revision:
+                return False
+            video_url, audio_url = urls
+            flags = f"-ss {offset} -t {max(1, settings.duration_limit_min * 60 - offset)}"
+            if local_path:
+                flags += " -protocol_whitelist file,pipe -format_whitelist mov,mp3,wav,flac,ogg,matroska,webm,aac"
+            stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track), ffmpeg_parameters=flags)
+            try:
+                try:
+                    await assistant.call_py.play(chat_id, stream)
+                except ChannelInvalid:
+                    async for _ in assistant.client.get_dialogs():
+                        pass
+                    if revision != session.revision:
+                        return False
+                    await assistant.call_py.play(chat_id, stream)
+                break
+            except Exception:
+                if not was_cached or attempt:
+                    raise
+                video_id = youtube_id(track.link)
+                _resolved_url_cache.pop(video_id, None)
+                _audio_url_cache.pop(video_id, None)
+                urls = await extract_urls(track.link, track.video)
+        if revision != session.revision:
+            return False
+        old_path = _local_paths.pop(chat_id, None)
+        if old_path:
+            old_path.unlink(missing_ok=True)
+        if local_path:
+            _local_paths[chat_id] = local_path
+            local_path = None
+        state = queues.get(chat_id)
+        state.is_paused = False
+        state.needs_resume = False
+        state.started_at = time.monotonic()
+        state.elapsed = float(offset)
+        schedule_prefetch(chat_id)
+        video_id = youtube_id(track.link)
+        if video_id:
+            asyncio.create_task(_record_play(video_id))
+            if track.video:
+                asyncio.create_task(_cached_urls_put(track.link, urls))
+            else:
+                _audio_url_cache[video_id] = (urls, time.monotonic())
+                while len(_audio_url_cache) > _RESOLVED_URL_CACHE_MAX_ENTRIES:
+                    _audio_url_cache.pop(next(iter(_audio_url_cache)))
+        return True
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        logger.warning("Failed to start playback for %r in chat %d", track.title, chat_id, exc_info=True)
+        logger.warning("Playback failed in chat %d", chat_id, exc_info=True)
+        from bot.core.alerts import notify
+        asyncio.create_task(notify(f"Playback failed in group {chat_id}. Check server logs or /doctor.", key=f"play:{chat_id}"))
         return False
-    queues.get(chat_id).is_paused = False
-    schedule_prefetch(chat_id)
-    # Fire-and-forget — feeds prewarm_popular_songs_loop()'s "most-played"
-    # ranking, never worth delaying the now-playing response for.
-    match = _VIDEO_ID_RE.search(track.link)
-    if match:
-        asyncio.create_task(_record_play(match.group(1)))
-    return True
+    finally:
+        if local_path:
+            local_path.unlink(missing_ok=True)
 
 
 async def _try_autoplay(chat_id: int) -> bool:
@@ -469,7 +512,7 @@ async def _try_autoplay(chat_id: int) -> bool:
     this chat, look up a YouTube-related track to the last one played and
     start it instead of leaving. Returns True if it started something."""
     state = queues.get(chat_id)
-    if not state.autoplay or state.last_track is None:
+    if not state.autoplay or state.last_track is None or get_session(chat_id).pending_requests:
         return False
     assistant = _get_healthy_assistant(chat_id)
     if assistant is None:
@@ -482,22 +525,21 @@ async def _try_autoplay(chat_id: int) -> bool:
     # or replaced its queue state while we were awaiting get_related(). Don't
     # resurrect playback the user already told the bot to stop, and don't
     # stomp a track a fresh /play just started.
-    if pool.get_assigned(chat_id) is not assistant or queues.get(chat_id) is not state:
+    if pool.get_assigned(chat_id) is not assistant or queues.get(chat_id) is not state or state.current is not None or not state.autoplay or get_session(chat_id).pending_requests:
         return False
     queues.add(chat_id, related)
     if not await _play_track(assistant, chat_id, related):
         queues.advance(chat_id, force=True)  # pop the broken pick back out
         return False
     try:
-        await send_track_card(
-            bot, chat_id, related, heading="🔁 AUTOPLAY", footer="▶️ Playing", keyboard=playback_keyboard(paused=False)
-        )
+        from bot.core.player import refresh
+        await refresh(chat_id)
     except Exception:
-        logger.warning("Failed to send autoplay announcement in %d", chat_id, exc_info=True)
+        logger.warning("Failed to refresh autoplay panel in %d", chat_id, exc_info=True)
     return True
 
 
-async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
+async def _advance_and_play_unlocked(chat_id: int, *, force: bool = False) -> None:
     """Shared by the stream-end handler (force=False — natural end-of-track,
     loop_mode="one" replays) and manual /skip (force=True — always moves on,
     otherwise loop_mode="one" would make /skip a permanent no-op).
@@ -531,9 +573,29 @@ async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
             break
         next_track = queues.advance(chat_id, force=True)
 
+    if force:
+        assistant = _get_healthy_assistant(chat_id)
+        if assistant is not None:
+            try:
+                await assistant.call_py.pause(chat_id)
+            except Exception:
+                logger.warning("Could not silence skipped track", exc_info=True)
     if await _try_autoplay(chat_id):
         return
     await _schedule_auto_leave(chat_id)
+
+
+async def _advance_and_play(chat_id: int, *, force: bool = False) -> None:
+    async with operation(chat_id):
+        await _advance_and_play_unlocked(chat_id, force=force)
+        await persist_queue(chat_id)
+
+
+async def persist_queue(chat_id: int) -> None:
+    try:
+        await db.save_queue(chat_id, queues.export(chat_id))
+    except Exception:
+        logger.warning("Queue snapshot failed for %d", chat_id, exc_info=True)
 
 
 async def join_and_play(chat_id: int, track: Track) -> tuple[Assistant | None, str | None]:
@@ -580,7 +642,11 @@ async def pause(chat_id: int) -> bool:
     except Exception:
         logger.warning("pause failed for chat %d", chat_id, exc_info=True)
         return False
-    queues.get(chat_id).is_paused = True
+    state = queues.get(chat_id)
+    if state.started_at is not None and not state.is_paused:
+        state.elapsed += time.monotonic() - state.started_at
+    state.started_at = None
+    state.is_paused = True
     return True
 
 
@@ -593,7 +659,9 @@ async def resume(chat_id: int) -> bool:
     except Exception:
         logger.warning("resume failed for chat %d", chat_id, exc_info=True)
         return False
-    queues.get(chat_id).is_paused = False
+    state = queues.get(chat_id)
+    state.is_paused = False
+    state.started_at = time.monotonic()
     return True
 
 
@@ -606,18 +674,28 @@ async def skip(chat_id: int) -> Track | None:
 
 
 async def stop(chat_id: int) -> bool:
-    """Leave the voice chat, free the assistant, and clear the queue."""
-    assistant = pool.get_assigned(chat_id)
-    _cancel_pending_leave(chat_id)
-    queues.clear(chat_id)
-    if assistant is None:
-        return False
-    pool.release(chat_id)
-    try:
-        await assistant.call_py.leave_call(chat_id)
-    except Exception:
-        logger.warning("leave_call failed for chat %d", chat_id, exc_info=True)
-    return True
+    session = await cancel_pending(chat_id)
+    async with session.lock:
+        assistant = pool.get_assigned(chat_id)
+        _cancel_pending_leave(chat_id)
+        for track in queues.get(chat_id).queue:
+            task = _prefetch_tasks.pop((track.link, track.video), None)
+            if task:
+                task.cancel()
+            _prefetch_cache.pop((track.link, track.video), None)
+        queues.clear(chat_id)
+        pool.release(chat_id)
+        try:
+            if assistant is not None:
+                await assistant.call_py.leave_call(chat_id)
+        except Exception:
+            logger.warning("leave_call failed for chat %d", chat_id, exc_info=True)
+        finally:
+            path = _local_paths.pop(chat_id, None)
+            if path:
+                path.unlink(missing_ok=True)
+        await persist_queue(chat_id)
+        return assistant is not None
 
 
 # How many consecutive stale_assignment_check_loop() cycles a chat must miss
@@ -672,41 +750,43 @@ async def stale_assignment_check_loop(interval_seconds: int = 60) -> None:
 
 
 async def seek(chat_id: int, seconds: int) -> bool:
-    """Restart the current track at an absolute offset. Not frame-accurate
-    scrubbing of an already-buffered stream (py-tgcalls exposes no such API)
-    — restarts decode at a fast input-side ffmpeg seek (`-ss`, placed before
-    `-i`), and re-calling .play() on a chat already in-call hot-swaps the
-    stream in place rather than leaving/rejoining."""
     assistant = _get_healthy_assistant(chat_id)
     track = queues.get(chat_id).current
-    if assistant is None or track is None:
+    if assistant is None or track is None or seconds < 0 or seconds >= settings.duration_limit_min * 60:
         return False
-    try:
-        await assistant.call_py.play(
-            chat_id,
-            MediaStream(track.link, ffmpeg_parameters=f"-ss {seconds}", video_flags=_video_flags(track)),
-        )
-    except Exception:
-        logger.warning("seek failed for chat %d", chat_id, exc_info=True)
+    from bot.utils.formatting import parse_duration_to_seconds
+    duration = parse_duration_to_seconds(track.duration)
+    if duration and seconds >= duration:
         return False
-    queues.get(chat_id).is_paused = False
-    return True
+    return await _play_track(assistant, chat_id, track, offset=seconds)
 
 
 def _register(call_py) -> None:
     @call_py.on_update(fl.stream_end())
     async def _stream_end(_, update: StreamEnded) -> None:
-        logger.info("Stream ended in %d", update.chat_id)
-        await _advance_and_play(update.chat_id)
+        if update.stream_type != StreamEnded.Type.AUDIO:
+            return
+        assistant = pool.get_assigned(update.chat_id)
+        if assistant is None or assistant.call_py is not call_py:
+            return
+        state = queues.get(update.chat_id)
+        expected = state.current
+        async with operation(update.chat_id):
+            if queues.get(update.chat_id).current is not expected or expected is None:
+                return
+            await _advance_and_play_unlocked(update.chat_id)
+            await persist_queue(update.chat_id)
+            from bot.core.player import refresh
+            await refresh(update.chat_id)
 
     @call_py.on_update(
         fl.chat_update(ChatUpdate.Status.KICKED | ChatUpdate.Status.LEFT_GROUP)
     )
     async def _left(_, update: ChatUpdate) -> None:
         logger.info("Removed from voice chat in %d", update.chat_id)
-        _cancel_pending_leave(update.chat_id)
-        queues.clear(update.chat_id)
-        pool.release(update.chat_id)
+        assistant = pool.get_assigned(update.chat_id)
+        if assistant is not None and assistant.call_py is call_py:
+            await stop(update.chat_id)
 
 
 def register_all_handlers() -> None:

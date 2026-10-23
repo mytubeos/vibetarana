@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Message
 
 from bot.core.queue import Track
@@ -29,10 +30,10 @@ def track_block(track: Track, *, heading: str, footer: str | None = None) -> str
     lines = [
         heading,
         "━━━━━━━━━━━━━━",
-        f"🎧 {track.title}",
+        f"🎧 {track.title[:250]}",
         f"📡 Source: {track.source}",
         f"⏱ Duration: {track.duration}",
-        f"🙋 Requested By: {track.requested_by_name}",
+        f"🙋 Requested By: {track.requested_by_name[:100]}",
     ]
     if footer:
         lines += ["━━━━━━━━━━━━━━", footer]
@@ -100,8 +101,11 @@ async def reply_track_card(
 ) -> Message:
     caption = track_block(track, heading=heading, footer=footer)
     if track.thumbnail:
-        return await message.reply_photo(track.thumbnail, caption=caption, reply_markup=keyboard)
-    return await message.reply_text(caption, reply_markup=keyboard)
+        try:
+            return await message.reply_photo(track.thumbnail, caption=caption, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
+        except Exception:
+            pass
+    return await message.reply_text(caption, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
 
 
 async def send_track_card(
@@ -115,8 +119,11 @@ async def send_track_card(
 ) -> Message:
     caption = track_block(track, heading=heading, footer=footer)
     if track.thumbnail:
-        return await client.send_photo(chat_id, track.thumbnail, caption=caption, reply_markup=keyboard)
-    return await client.send_message(chat_id, caption, reply_markup=keyboard)
+        try:
+            return await client.send_photo(chat_id, track.thumbnail, caption=caption, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
+        except Exception:
+            pass
+    return await client.send_message(chat_id, caption, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
 
 
 async def edit_track_card(
@@ -130,9 +137,11 @@ async def edit_track_card(
     before this track-card feature existed."""
     caption = track_block(track, heading=heading, footer=footer)
     if target.photo and track.thumbnail:
-        await target.edit_media(InputMediaPhoto(track.thumbnail, caption=caption), reply_markup=keyboard)
+        await target.edit_media(InputMediaPhoto(track.thumbnail, caption=caption, parse_mode=ParseMode.DISABLED), reply_markup=keyboard)
+    elif target.photo:
+        await target.edit_caption(caption, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
     else:
-        await target.edit_text(caption, reply_markup=keyboard)
+        await target.edit_text(caption, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
 
 
 async def edit_card_status(target: Message, text: str, *, keyboard: InlineKeyboardMarkup | None = None) -> None:
@@ -143,6 +152,6 @@ async def edit_card_status(target: Message, text: str, *, keyboard: InlineKeyboa
     used deliberately for the stopped/queue-empty cases, where the buttons
     no longer do anything useful."""
     if target.photo:
-        await target.edit_caption(text, reply_markup=keyboard)
+        await target.edit_caption(text, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
     else:
-        await target.edit_text(text, reply_markup=keyboard)
+        await target.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.DISABLED)

@@ -27,7 +27,7 @@ def _is_owner_id(user_id: int) -> bool:
 # the same admin. 5 minutes is a deliberate tradeoff for a music bot: a
 # demoted admin stays able to control playback for up to 5 more minutes,
 # acceptable here since nothing security-sensitive is gated by this check.
-_ADMIN_CACHE_TTL_SECONDS = 300
+_ADMIN_CACHE_TTL_SECONDS = 30
 _ADMIN_CACHE_MAX_ENTRIES = 2000
 _admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 
@@ -69,3 +69,49 @@ async def _is_admin_or_owner(_, client, message: Message) -> bool:
 
 owner_filter = filters.create(_is_owner)
 admin_filter = filters.create(_is_admin_or_owner)
+
+
+async def can_control(client, user_id: int, chat: Chat) -> bool:
+    if await user_is_admin_or_owner(client, user_id, chat):
+        return True
+    from bot.core import preferences
+    pref = await preferences.get(chat.id)
+    if user_id not in pref['dj_users']:
+        return False
+    try:
+        member = await client.get_chat_member(chat.id, user_id)
+        return member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR) or (member.status == ChatMemberStatus.RESTRICTED and getattr(member, 'is_member', False))
+    except Exception:
+        return False
+
+
+async def can_request(client, user_id: int, chat: Chat) -> bool:
+    if await can_control(client, user_id, chat):
+        return True
+    from bot.core import preferences
+    pref = await preferences.get(chat.id)
+    if pref['play_mode'] != 'members':
+        return False
+    try:
+        member = await client.get_chat_member(chat.id, user_id)
+        return member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR) or (member.status == ChatMemberStatus.RESTRICTED and getattr(member, 'is_member', False))
+    except Exception:
+        return False
+
+
+async def _request(_, client, message):
+    if message.from_user and await can_request(client, message.from_user.id, message.chat):
+        return True
+    await message.reply_text('Music requests are restricted. Ask a group admin to use /settings mode members or /dj add.')
+    return False
+
+
+async def _control(_, client, message):
+    if message.from_user and await can_control(client, message.from_user.id, message.chat):
+        return True
+    await message.reply_text('Playback controls are for admins and designated DJs.')
+    return False
+
+
+request_filter = filters.create(_request)
+control_filter = filters.create(_control)

@@ -1,0 +1,10 @@
+"""Core user-facing flows. Command names remain stable across languages."""
+MESSAGES = {
+ 'en': {'welcome': 'Welcome to Vibetarana! Add the bot and an assistant to your group, start a voice chat, then use /doctor and /play.', 'loading': 'Finding your music…', 'queued': 'Added to queue', 'playing': 'Now playing', 'empty': 'Nothing is playing.', 'stopped': 'Stopped. Your preferences are saved.', 'cancelled': 'Request cancelled.', 'busy': 'All assistants are busy. Try again shortly.', 'failed': 'Could not play this track. Try another result.', 'restricted': 'Your group permissions do not allow this action.', 'saved': 'Saved.', 'cooldown': 'Please wait a few seconds before another request.'},
+ 'hinglish': {'welcome': 'Vibetarana mein welcome! Bot aur assistant ko group mein add karo, voice chat start karo, phir /doctor aur /play use karo.', 'loading': 'Aapka gaana dhoondh rahe hain…', 'queued': 'Queue mein add ho gaya', 'playing': 'Ab baj raha hai', 'empty': 'Abhi koi gaana nahi chal raha.', 'stopped': 'Playback band. Aapki settings saved hain.', 'cancelled': 'Request cancel ho gayi.', 'busy': 'Sab assistants busy hain. Thodi der baad try karo.', 'failed': 'Ye gaana nahi chal saka. Dusra result try karo.', 'restricted': 'Group permissions is action ko allow nahi karti.', 'saved': 'Save ho gaya.', 'cooldown': 'Agli request se pehle kuch seconds ruko.'},
+ 'hi': {'welcome': 'Vibetarana में आपका स्वागत है! बॉट और असिस्टेंट को समूह में जोड़ें, वॉइस चैट शुरू करें, फिर /doctor और /play इस्तेमाल करें।', 'loading': 'आपका गाना खोज रहे हैं…', 'queued': 'कतार में जोड़ा गया', 'playing': 'अभी चल रहा है', 'empty': 'अभी कोई गाना नहीं चल रहा।', 'stopped': 'प्लेबैक बंद। आपकी सेटिंग्स सुरक्षित हैं।', 'cancelled': 'अनुरोध रद्द हुआ।', 'busy': 'सभी असिस्टेंट व्यस्त हैं। थोड़ी देर बाद कोशिश करें।', 'failed': 'यह गाना नहीं चल सका। दूसरा परिणाम चुनें।', 'restricted': 'समूह की अनुमतियाँ इस कार्रवाई की इजाज़त नहीं देतीं।', 'saved': 'सहेज दिया गया।', 'cooldown': 'अगले अनुरोध से पहले कुछ सेकंड रुकें।'}
+}
+
+
+def text(key: str, language: str = 'en') -> str:
+    return MESSAGES.get(language, MESSAGES['en']).get(key, MESSAGES['en'][key])

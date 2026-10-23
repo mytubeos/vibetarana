@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from typing import Annotated
 
-from pydantic import ValidationError, field_validator
+from pydantic import ValidationError, field_validator, Field
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -28,9 +28,14 @@ class Settings(BaseSettings):
     mongo_uri: str
 
     log_group_id: int | None = None
-    duration_limit_min: int = 60
-    max_vc_per_assistant: int = 1
+    duration_limit_min: int = Field(default=60, ge=1, le=240)
+    max_vc_per_assistant: int = Field(default=1, ge=1, le=1)
     default_lang: str = "en"
+    max_queue_tracks: int = Field(default=100, ge=1, le=500)
+    max_media_mb: int = Field(default=50, ge=1, le=200)
+    extraction_concurrency: int = Field(default=2, ge=1, le=8)
+    request_cooldown_seconds: int = Field(default=3, ge=0, le=60)
+    allow_direct_links: bool = False
 
     # Optional — Spotify link resolution (bot/platforms/spotify.py) degrades
     # gracefully to "unsupported" without these, rather than failing to start.

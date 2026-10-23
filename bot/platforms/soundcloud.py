@@ -30,7 +30,7 @@ def matches(query: str) -> bool:
 
 async def resolve(query: str, requested_by: int, requested_by_name: str) -> Track | None:
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
             async with session.get(
                 "https://soundcloud.com/oembed",
                 params={"url": query, "format": "json"},

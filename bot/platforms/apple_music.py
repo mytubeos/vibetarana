@@ -39,7 +39,7 @@ async def resolve(query: str, requested_by: int, requested_by_name: str) -> Trac
         return None
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
             async with session.get(
                 "https://itunes.apple.com/lookup",
                 params={"id": match.group(1)},

@@ -8,6 +8,7 @@ import json
 import random
 from dataclasses import asdict, dataclass, field
 from typing import Literal
+import time
 
 LoopMode = Literal["off", "one", "all"]
 
@@ -40,6 +41,10 @@ class ChatPlaybackState:
     # to find something related; set by advance() whenever a track finishes.
     autoplay: bool = False
     last_track: Track | None = None
+    history: list[Track] = field(default_factory=list)
+    started_at: float | None = None
+    elapsed: float = 0.0
+    needs_resume: bool = False
 
     @property
     def current(self) -> Track | None:
@@ -50,7 +55,7 @@ def _track_from_dict(data: object) -> Track:
     if not isinstance(data, dict) or not _REQUIRED_TRACK_FIELDS <= data.keys():
         raise ValueError("track is missing required fields")
     link = str(data["link"])
-    if not link.startswith(("http://", "https://")):
+    if not link.startswith(("http://", "https://", "tgfile:")):
         raise ValueError("track link must be an http(s) URL")
     try:
         requested_by = int(data["requested_by"])
@@ -109,12 +114,30 @@ class QueueManager:
                 return state.current
             finished = state.queue.pop(0)
             state.last_track = finished
+            state.history = (state.history + [finished])[-20:]
             if state.loop_mode == "all":
                 state.queue.append(finished)
         return state.current
 
     def clear(self, chat_id: int) -> None:
-        self._chats.pop(chat_id, None)
+        old = self._chats.get(chat_id)
+        self._chats[chat_id] = ChatPlaybackState(
+            loop_mode=old.loop_mode if old else "off",
+            autoplay=old.autoplay if old else False,
+            history=list(old.history) if old else [],
+        )
+
+    def remove(self, chat_id: int, position: int) -> Track:
+        state = self.get(chat_id)
+        if position < 2 or position > len(state.queue):
+            raise ValueError("Choose an upcoming position (2 or greater). Use /skip for the current track.")
+        return state.queue.pop(position - 1)
+
+    def move(self, chat_id: int, source: int, destination: int) -> None:
+        state = self.get(chat_id)
+        if not (2 <= source <= len(state.queue) and 2 <= destination <= len(state.queue)):
+            raise ValueError("Both positions must refer to upcoming tracks (2 or greater).")
+        state.queue.insert(destination - 1, state.queue.pop(source - 1))
 
     def shuffle(self, chat_id: int) -> bool:
         """Randomize queued (not currently-playing) tracks in place. Returns
@@ -133,6 +156,7 @@ class QueueManager:
             "version": 1,
             "chat_id": chat_id,
             "loop_mode": state.loop_mode,
+            "autoplay": state.autoplay,
             "tracks": [asdict(t) for t in state.queue],
         }
 
@@ -149,6 +173,8 @@ class QueueManager:
             raise ValueError("missing or invalid 'tracks' array")
         if len(data["tracks"]) > MAX_IMPORT_TRACKS:
             raise ValueError(f"too many tracks (max {MAX_IMPORT_TRACKS})")
+        if len(self.get(chat_id).queue) + len(data["tracks"]) > MAX_IMPORT_TRACKS:
+            raise ValueError("queue capacity exceeded")
         tracks = [_track_from_dict(t) for t in data["tracks"]]
         self.get(chat_id).queue.extend(tracks)
         return len(tracks)

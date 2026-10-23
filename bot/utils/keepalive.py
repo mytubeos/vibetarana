@@ -23,7 +23,18 @@ async def start_keepalive_server() -> web.AppRunner | None:
         return None
 
     async def health(_request: web.Request) -> web.Response:
-        return web.Response(text="OK")
+        from bot.core import db
+        from bot.core.client import bot
+        from bot.core.assistants import pool
+        connected = bool(getattr(bot, 'is_connected', False))
+        assistants = any(a.healthy for a in pool.assistants)
+        try:
+            await db.db.command('ping')
+            database = True
+        except Exception:
+            database = False
+        ready = connected and assistants and database
+        return web.json_response({'ready': ready, 'telegram': connected, 'assistants': assistants, 'database': database}, status=200 if ready else 503)
 
     app = web.Application()
     app.router.add_get("/", health)

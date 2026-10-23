@@ -1,151 +1,117 @@
-"""Queue commands: /queue /loop /shuffle /export /import /autoplay."""
+"""Bounded queues with numbered pagination and transactional editing."""
+import asyncio
 import json
 from io import BytesIO
-
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import Message
-
-from bot.core import calls, db
-from bot.core.decorators import admin_filter
+from bot.core import calls, preferences, service, player
+from bot.core.decorators import control_filter
 from bot.core.queue import queues
-from bot.utils.formatting import format_seconds, parse_duration_to_seconds
+from bot.core.session import operation, get_session
 
 MAX_IMPORT_FILE_BYTES = 512 * 1024
 
 
-@Client.on_message(filters.command("queue") & filters.group)
-async def queue_cmd(_: Client, message: Message) -> None:
+@Client.on_message(filters.command('queue') & filters.group)
+async def queue_cmd(_, message):
     state = queues.get(message.chat.id)
-    if state.current is None:
-        await message.reply_text("Queue is empty.")
-        return
-
-    total_seconds = sum(parse_duration_to_seconds(t.duration) for t in state.queue)
-
-    lines = [
-        "📋 QUEUE",
-        "━━━━━━━━━━━━━━",
-        "▶️ Now Playing",
-        f"🎧 {state.current.title}",
-        f"⏱ {state.current.duration}  •  🙋 {state.current.requested_by_name}",
-        "━━━━━━━━━━━━━━",
-        f"⏳ Total Songs: {len(state.queue)}  •  🕒 Total Queue Time: {format_seconds(total_seconds)}",
-        f"🔁 Loop: {state.loop_mode}  •  🔀 Autoplay: {'on' if state.autoplay else 'off'}",
-    ]
-    upcoming = state.queue[1:21]
-    if upcoming:
-        lines.append("━━━━━━━━━━━━━━")
-        lines.append("📜 Up Next")
-        lines.extend(
-            f"{i}. {track.title}  ⏱ {track.duration}  •  🙋 {track.requested_by_name}"
-            for i, track in enumerate(upcoming, start=1)
-        )
-    remaining = len(state.queue) - 1 - len(upcoming)
-    if remaining > 0:
-        lines.append(f"...and {remaining} more.")
-
-    # Track titles may come from an imported (untrusted) queue file — disable
-    # markdown parsing so a hostile title can't inject formatting/links.
-    await message.reply_text("\n".join(lines), parse_mode=ParseMode.DISABLED)
-
-
-@Client.on_message(filters.command("loop") & filters.group & admin_filter)
-async def loop_cmd(_: Client, message: Message) -> None:
-    if len(message.command) < 2 or message.command[1].lower() not in ("off", "one", "all"):
-        # parse_mode disabled: the <off|one|all> placeholder gets misread as
-        # an HTML tag by Pyrogram's combined Markdown+HTML parser, which
-        # corrupts the backtick-code entity and throws EntityBoundsInvalid.
-        await message.reply_text("Usage: /loop <off|one|all>", parse_mode=ParseMode.DISABLED)
-        return
-
-    mode = message.command[1].lower()
-    queues.get(message.chat.id).loop_mode = mode
-    await db.set_chat_setting(message.chat.id, loop_mode=mode)
-    await message.reply_text(f"🔁 Loop mode set to `{mode}`.")
-
-
-@Client.on_message(filters.command("autoplay") & filters.group & admin_filter)
-async def autoplay_cmd(_: Client, message: Message) -> None:
-    if len(message.command) < 2 or message.command[1].lower() not in ("on", "off"):
-        await message.reply_text("Usage: /autoplay <on|off>", parse_mode=ParseMode.DISABLED)
-        return
-
-    enabled = message.command[1].lower() == "on"
-    queues.get(message.chat.id).autoplay = enabled
-    await db.set_chat_setting(message.chat.id, autoplay=enabled)
-    await message.reply_text(
-        f"🔁 Autoplay turned {'on' if enabled else 'off'} — "
-        + (
-            "when the queue empties, I'll keep playing related tracks instead of leaving."
-            if enabled
-            else "I'll leave the voice chat after the queue's been empty for a bit, like before."
-        )
-    )
-
-
-@Client.on_message(filters.command("shuffle") & filters.group & admin_filter)
-async def shuffle_cmd(_: Client, message: Message) -> None:
-    ok = queues.shuffle(message.chat.id)
-    await message.reply_text("🔀 Queue shuffled." if ok else "Not enough tracks queued to shuffle.")
-
-
-@Client.on_message(filters.command("export") & filters.group)
-async def export_cmd(_: Client, message: Message) -> None:
-    state = queues.get(message.chat.id)
-    if not state.queue:
-        await message.reply_text("Queue is empty — nothing to export.")
-        return
-
-    payload = json.dumps(queues.export(message.chat.id), indent=2).encode("utf-8")
-    file = BytesIO(payload)
-    file.name = f"queue_{message.chat.id}.json"
-    await message.reply_document(file, caption=f"Exported {len(state.queue)} track(s).")
-
-
-@Client.on_message(filters.command("import") & filters.group & admin_filter)
-async def import_cmd(client: Client, message: Message) -> None:
-    reply = message.reply_to_message
-    file_name = reply.document.file_name if reply and reply.document else None
-    if not file_name or not file_name.endswith(".json"):
-        await message.reply_text("Reply to a `.json` queue file (from /export) with `/import`.")
-        return
-    if reply.document.file_size and reply.document.file_size > MAX_IMPORT_FILE_BYTES:
-        await message.reply_text("That file is too large to import (max 512 KB).")
-        return
-
-    chat_id = message.chat.id
-    was_idle = queues.get(chat_id).current is None
     try:
-        buffer = await client.download_media(reply, in_memory=True)
-        added = queues.import_queue(chat_id, buffer.getvalue())
-    except ValueError as exc:
-        await message.reply_text(f"Couldn't import that queue: {exc}")
+        page = int(message.command[1]) if len(message.command) > 1 else 1
+        if page < 1:
+            raise ValueError
+    except ValueError:
+        await message.reply_text('Usage: /queue page (1 or greater)')
         return
-    except Exception:
-        await message.reply_text("Couldn't download or read that file.")
+    if not state.queue:
+        await message.reply_text('Queue is empty.')
         return
+    pages = (len(state.queue) + 9) // 10
+    if page > pages:
+        await message.reply_text(f'Choose a page from 1 to {pages}.')
+        return
+    start = (page - 1) * 10
+    lines = [f'Vibetarana queue · {page}/{pages}', 'Position 1 is the current track.']
+    for i, track in enumerate(state.queue[start:start + 10], start + 1):
+        lines.append(f'{i}. {track.title[:150]} · {track.duration[:20]} · {track.requested_by_name[:50]}')
+    await message.reply_text('\n'.join(lines), parse_mode=ParseMode.DISABLED)
 
-    if was_idle:
-        next_track = queues.get(chat_id).current
-        if next_track is not None:
-            assistant, reason = await calls.join_and_play(chat_id, next_track)
-            if assistant is None:
-                # Mirror play.py's rollback: leaving imported tracks queued
-                # with no assistant playing them would make `current` look
-                # "playing" to every check that follows (was_idle in a later
-                # /play, /skip reporting a track that never actually streams)
-                # even though nothing is — so discard the batch instead.
-                queues.clear(chat_id)
-                if reason == "busy":
-                    await message.reply_text(
-                        "All assistants are busy right now — try again in a bit, or ask "
-                        "the bot owner to add another assistant account. Nothing was imported."
-                    )
-                else:
-                    await message.reply_text(
-                        "The first imported track failed to load — try again. Nothing was imported."
-                    )
-                return
 
-    await message.reply_text(f"📥 Imported {added} track(s).")
+@Client.on_message(filters.command(['loop', 'autoplay']) & filters.group & control_filter)
+async def settings_cmd(_, message):
+    name = message.command[0].lower()
+    allowed = ('off', 'one', 'all') if name == 'loop' else ('on', 'off')
+    if len(message.command) != 2 or message.command[1].lower() not in allowed:
+        await message.reply_text(f'Usage: /{name} ' + '|'.join(allowed), parse_mode=ParseMode.DISABLED)
+        return
+    value = message.command[1].lower()
+    async with operation(message.chat.id):
+        await preferences.set(message.chat.id, **({'loop_mode': value} if name == 'loop' else {'autoplay': value == 'on'}))
+    await player.refresh(message.chat.id)
+    await message.reply_text(f'{name}: {value} (saved)')
+
+
+@Client.on_message(filters.command(['shuffle', 'remove', 'move', 'clearqueue']) & filters.group & control_filter)
+async def edit_queue(_, message):
+    chat_id = message.chat.id
+    try:
+        async with operation(chat_id):
+            name = message.command[0].lower()
+            if name == 'remove':
+                queues.remove(chat_id, int(message.command[1]))
+            elif name == 'move':
+                queues.move(chat_id, int(message.command[1]), int(message.command[2]))
+            elif name == 'shuffle':
+                if not queues.shuffle(chat_id):
+                    raise ValueError('Add at least two upcoming songs to shuffle.')
+            else:
+                queues.get(chat_id).queue[1:] = []
+            calls.schedule_prefetch(chat_id)
+            await calls.persist_queue(chat_id)
+        await player.refresh(chat_id)
+        await message.reply_text('Queue updated.')
+    except (ValueError, IndexError) as exc:
+        await message.reply_text(str(exc) if isinstance(exc, ValueError) else 'Usage: /remove 2 or /move 3 2. Position 1 is the current track.', parse_mode=ParseMode.DISABLED)
+    except asyncio.CancelledError:
+        await message.reply_text('Queue edit cancelled.')
+
+
+@Client.on_message(filters.command('history') & filters.group)
+async def history_cmd(_, message):
+    history = queues.get(message.chat.id).history[-10:]
+    await message.reply_text('\n'.join(t.title[:150] for t in reversed(history)) or 'No recent tracks in this session.', parse_mode=ParseMode.DISABLED)
+
+
+@Client.on_message(filters.command('export') & filters.group)
+async def export_cmd(_, message):
+    file = BytesIO(json.dumps(queues.export(message.chat.id)).encode())
+    file.name = 'vibetarana-queue.json'
+    await message.reply_document(file, caption='Queue export. Reply with /import to restore.')
+
+
+@Client.on_message(filters.command('import') & filters.group & control_filter)
+async def import_cmd(client, message):
+    reply = message.reply_to_message
+    doc = reply.document if reply else None
+    if not doc or not doc.file_name or not doc.file_name.endswith('.json') or not doc.file_size or doc.file_size > MAX_IMPORT_FILE_BYTES:
+        await message.reply_text('Reply to a JSON queue file, maximum 512 KB.')
+        return
+    revision = get_session(message.chat.id).revision
+    try:
+        async def progress(current, total):
+            if max(current, total) > MAX_IMPORT_FILE_BYTES:
+                client.stop_transmission()
+        async with asyncio.timeout(30):
+            buffer = await client.download_media(reply, in_memory=True, progress=progress)
+        if buffer is None or len(buffer.getvalue()) > MAX_IMPORT_FILE_BYTES:
+            raise ValueError('File exceeded the size limit.')
+        payload = json.loads(buffer.getvalue())
+        if not isinstance(payload, dict):
+            raise ValueError('Invalid queue file.')
+        tracks = service.deserialize(payload.get('tracks'), message.from_user)
+        await service.enqueue(message.chat.id, tracks, revision=revision)
+        await message.reply_text(f'Imported {len(tracks)} tracks.')
+        await player.refresh(message.chat.id, create=True)
+    except asyncio.CancelledError:
+        await message.reply_text('Import cancelled.')
+    except Exception as exc:
+        await message.reply_text(f'Import failed: {str(exc)[:180]}', parse_mode=ParseMode.DISABLED)

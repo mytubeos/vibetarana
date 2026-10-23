@@ -141,6 +141,8 @@ class AssistantPool:
                 except Exception:
                     logger.warning("Assistant %d failed health check", assistant.index, exc_info=True)
                     assistant.healthy = False
+                    from bot.core.alerts import notify
+                    await notify(f"Assistant {assistant.index} failed its connection check.", key=f"assistant:{assistant.index}")
 
 
 pool = AssistantPool()

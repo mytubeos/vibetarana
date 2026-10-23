@@ -1,53 +1,39 @@
-"""/start and /help commands."""
+"""Vibetarana onboarding and discoverable command help."""
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.enums import ParseMode
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from bot.core import preferences
+from bot.core.i18n import text
+from config import settings
 
-START_TEXT = (
-    "Hi! I'm a voice-chat music bot.\n\n"
-    "Add me and an assistant account to a group, start the voice chat, then "
-    "use /play <song name, YouTube link, Spotify link, Apple Music link, or "
-    "SoundCloud link> to get going. /help for the full command list."
-)
+HELP_TEXT = """Vibetarana
 
-HELP_TEXT = (
-    "🎵 **Playback**\n"
-    "/play — Play music\n"
-    "/vplay — Play video\n"
-    "/playforce — Force-play, skipping the queue\n"
-    "/vplayforce — Force-play video, skipping the queue\n"
-    "/player — Show the interactive player panel\n"
-    "/pause — Pause playback\n"
-    "/resume — Resume playback\n"
-    "/skip — Skip track\n"
-    "/stop — Stop player\n"
-    "/seek — Seek position\n\n"
-    "📋 **Queue**\n"
-    "/queue — Show queue\n"
-    "/loop — Repeat mode\n"
-    "/autoplay — Auto play\n"
-    "/shuffle — Shuffle queue\n"
-    "/export — Export queue\n"
-    "/import — Import queue\n\n"
-    "👑 **Admin**\n"
-    "/addsudo — Add sudo\n"
-    "/delsudo — Remove sudo\n\n"
-    "⚡ **Other**\n"
-    "/ping — Bot status\n\n"
-    "🔒 Playback commands: admins, sudo users, and the owner.\n"
-    "Send a command with no arguments to see its exact usage."
-)
+PLAY: /play song or URL · /vplay · reply to audio/video with /play
+DISCOVER: /search artist song · /favourite
+PLAYER: /player · /pause · /resume · /skip · /stop · /seek seconds
+QUEUE: /queue page · /playnext song · /remove 2 · /move 3 2
+/shuffle · /clearqueue (keeps current) · /history · /export · /import
+REPEAT: /loop off|one|all · /autoplay on|off
+LIBRARY: /playlist list|save name|load name|delete name
+/gplaylist for shared group playlists · /playlist load favourites
+ADMIN: /settings · /dj add|remove user_id · /doctor
+FORCE: /playforce · /vplayforce (admins/DJs)
+OWNER: /addsudo · /delsudo · /stopall
 
+Queue positions start at 1 (current track). Requests default to admins/DJs.
+Admins can enable /settings mode members. Saved queues wait for /resume after restart.
+Language: /settings language en|hi|hinglish (core player/onboarding messages).
+"""
 
-@Client.on_message(filters.command("start") & filters.private)
-async def start_cmd(_: Client, message: Message) -> None:
-    await message.reply_text(START_TEXT)
+@Client.on_message(filters.command('start'))
+async def start_cmd(client, message):
+    language = settings.default_lang
+    if message.chat.type.value in ('group', 'supergroup'):
+        language = (await preferences.get(message.chat.id))['language']
+    me = await client.get_me()
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton('Add Vibetarana to a group', url=f'https://t.me/{me.username}?startgroup=true')]]) if me.username else None
+    await message.reply_text(text('welcome', language), reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
 
-
-@Client.on_message(filters.command("start") & filters.group)
-async def start_group_cmd(_: Client, message: Message) -> None:
-    await message.reply_text("I'm alive — use /help to see what I can do.")
-
-
-@Client.on_message(filters.command("help"))
-async def help_cmd(_: Client, message: Message) -> None:
-    await message.reply_text(HELP_TEXT)
+@Client.on_message(filters.command('help'))
+async def help_cmd(_, message):
+    await message.reply_text(HELP_TEXT, parse_mode=ParseMode.DISABLED)

@@ -25,10 +25,11 @@ _sudo_cache: set[int] = set()
 
 async def connect() -> None:
     global _client, db
-    _client = AsyncMongoClient(settings.mongo_uri)
+    _client = AsyncMongoClient(settings.mongo_uri, serverSelectionTimeoutMS=5000, timeoutMS=8000)
     db = _client.get_default_database(default="tg2_musicbot")
     await db.command("ping")
     await _refresh_sudo_cache()
+    await db.playlists.create_index([("scope", 1), ("name", 1)], unique=True)
     logger.info("Connected to MongoDB (%d sudo user(s) cached)", len(_sudo_cache))
 
 
@@ -70,6 +71,8 @@ DEFAULT_CHAT_SETTINGS = {"loop_mode": "off", "autoplay": False}
 
 
 async def get_chat_settings(chat_id: int) -> dict:
+    if db is None:
+        return {"_id": chat_id, **DEFAULT_CHAT_SETTINGS}
     doc = await db.chat_settings.find_one({"_id": chat_id})
     return doc or {"_id": chat_id, **DEFAULT_CHAT_SETTINGS}
 
@@ -110,3 +113,34 @@ async def record_play(video_id: str) -> None:
 async def get_top_played_video_ids(limit: int) -> list[str]:
     cursor = db.play_counts.find({}, {"_id": 1}).sort("count", -1).limit(limit)
     return [doc["_id"] async for doc in cursor]
+
+
+async def save_queue(chat_id: int, payload: dict) -> None:
+    if db is not None:
+        await db.queue_snapshots.replace_one({"_id": chat_id}, {"_id": chat_id, **payload}, upsert=True)
+
+
+async def get_queues() -> list[dict]:
+    if db is None:
+        return []
+    return [doc async for doc in db.queue_snapshots.find({})]
+
+
+async def save_playlist(scope: str, name: str, tracks: list[dict]) -> None:
+    if not await db.playlists.find_one({"scope": scope, "name": name}) and await db.playlists.count_documents({"scope": scope}) >= 30:
+        raise ValueError("Maximum 30 playlists per user/group.")
+    await db.playlists.update_one({"scope": scope, "name": name}, {"$set": {"tracks": tracks}}, upsert=True)
+
+
+async def list_playlists(scope: str) -> list[str]:
+    return [doc['name'] async for doc in db.playlists.find({'scope': scope}, {'name': 1}).sort('name', 1).limit(30)]
+
+
+async def get_playlist(scope: str, name: str) -> list[dict] | None:
+    doc = await db.playlists.find_one({'scope': scope, 'name': name})
+    return doc['tracks'] if doc else None
+
+
+async def delete_playlist(scope: str, name: str) -> bool:
+    result = await db.playlists.delete_one({'scope': scope, 'name': name})
+    return bool(result.deleted_count)

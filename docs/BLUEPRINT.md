@@ -1,6 +1,6 @@
 # Vibetarana implementation blueprint
 
-Decision date: 24 October 2026. Baseline: `5e7658a`.
+Decision date: 24 October 2026. Expanded implementation: 27 October 2026. Baseline: `5e7658a`.
 
 ## Product goal
 
@@ -13,9 +13,9 @@ experience before adding AI or rebuilding the stack.
 | Release | Scope | Status |
 | --- | --- | --- |
 | R1 (this implementation) | Stable playback coordination, limits, durable settings/queue, safe file playback, search choices, playlists/favourites, queue tools, group roles, player panel, diagnostics, core localization, CI | Implemented; offline regression gate required, live acceptance pending |
-| R2 | Vote skip, per-requester fair queue, improved recommendations with history/language preferences, bounded external playlist import, scheduled sessions, opt-in radio | Planned, not implemented |
-| R3 | Operator dashboard, measured scaling, worker leases, capacity planning, automated deployment rollback | Planned, not implemented |
-| R4 | Telegram Mini App, AI mood requests, optional recognition/lyrics providers, premium service design | Planned, not implemented |
+| R2 | Vote skip, fair queue, history/language recommendations, YouTube playlist import, one-shot schedules, configured YouTube radio, video output quality | Implemented with bounded provider scope; live acceptance pending |
+| R3 | Operator dashboard, process metrics, exclusive worker leases, capacity planning, startup rollback | Code and runbook implemented; production measurement and active/active sharding pending |
+| R4 | Telegram Mini App, AI mood requests, optional recognition/lyrics providers, premium service design | Code and design implemented; credentials/hosting/provider acceptance pending, no billing |
 
 ## R1 architecture
 
@@ -75,10 +75,10 @@ are bound to the requesting user, chat and stop revision.
 - Untrusted downloads use restricted local ffmpeg protocols and media formats.
   HLS/M3U8/live radio through generic direct links is deferred until a safe streaming design exists.
 - Spotify/Apple Music/SoundCloud resolve catalog metadata to YouTube matches; they are
-  not independent audio backends. Playlist URLs are not supported in R1.
+  not independent audio backends. R1 did not support playlist URLs; the expanded release imports public YouTube playlists.
 - Core onboarding, play-status and player messages have English/Hindi/Hinglish text.
   Detailed command help, diagnostic and validation strings remain English in R1.
-- Video uses the existing stream defaults; user-adjustable quality belongs in R2.
+- Video uses the existing stream defaults; R2 now provides user-adjustable output quality through /policy video.
 
 ## Acceptance gates
 
@@ -125,14 +125,34 @@ Rollback means restoring the previous image/commit; new collections can remain.
 Never overwrite tokens, cookies or assistant sessions from version control.
 GitHub commits are source delivery; they are not proof of successful deployment.
 
-## Subsequent decisions
+## Expanded implementation map
 
-R2 should start with fair queue/vote skip and smarter autoplay. Schedule/radio need
-persistent jobs, explicit timezones, cancellation and provider compatibility tests.
-R3 scaling requires shared leases before running multiple workers against the same
-assistant sessions. R4 Mini App needs Telegram init-data validation and server-side
-chat authorization; AI recommendations should suggest only tracks the playback
-providers can actually resolve.
+The user authorized the remaining blueprint implementation on 27 October 2026.
+Detailed configuration, semantics and limits are in [OPERATIONS.md](OPERATIONS.md).
+
+- `community.py` / `queue.py`: round-robin requests, unique-member votes, group policies.
+- `recommendations.py`: skip session history and bias real searches by music language.
+- `platforms/playlist.py`: canonical public YouTube playlist metadata, max 50 entries.
+- `scheduler.py` / `plugins/sessions.py`: durable single-fire snapshots, timezone validation,
+  status/cancellation, admin recheck, missed/interrupted outcomes and approved radio.
+- `lease.py`: exclusive deployment ownership, fail-closed renewal, guarded mutations.
+- `metrics.py`: bounded real playback observations, resource/capacity snapshots.
+- `web/`: signed Telegram authentication, live membership checks, protected controls,
+  private playlist loading, responsive listening UI and owner dashboard.
+- `discovery.py`: optional OpenAI mood queries, AudD clips and LRCLIB links, bounded
+  responses/time/concurrency and per-provider hourly limits.
+- `scripts/deploy.py`: managed single-host promotion and failed-readiness rollback.
+- CI: Python regressions, real Mongo lease/job integration and browser smoke tests.
+
+### Remaining acceptance and scope limits
+
+This does not mark the live acceptance gates complete. HTTPS deployment/BotFather,
+provider credentials, real Telegram streaming, radio-provider compatibility,
+Docker-host promotion and production load/soak measurements still require the
+operator's environment. Multiworker active/active sharding is not enabled; the lease
+prevents overlapping use of one bot/session pool. Raw HLS radio, non-YouTube playlist
+pagination and recurring schedules are not implemented. Premium is a service design,
+not a payment integration. These limits are explicit rather than placeholder handlers.
 
 ## Research references
 

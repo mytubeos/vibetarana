@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     extraction_concurrency: int = Field(default=2, ge=1, le=8)
     request_cooldown_seconds: int = Field(default=3, ge=0, le=60)
     allow_direct_links: bool = False
+    webapp_url: str = ""
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4.1-mini"
+    audd_api_token: str = ""
+    lyrics_enabled: bool = False
+    provider_requests_per_hour: int = Field(default=60, ge=1, le=1000)
+    radio_stations: dict[str, str] = Field(default_factory=dict)
+    worker_lease_seconds: int = Field(default=60, ge=30, le=300)
 
     # Optional — Spotify link resolution (bot/platforms/spotify.py) degrades
     # gracefully to "unsupported" without these, rather than failing to start.

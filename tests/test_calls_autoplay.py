@@ -13,7 +13,7 @@ from bot.core.queue import QueueManager, Track
 
 def make_track(title: str = "seed") -> Track:
     return Track(
-        title=title, duration="1:00", link="https://youtube.com/watch?v=seed12345678",
+        title=title, duration="1:00", link="https://youtube.com/watch?v=" + ("seed1234567" if title == "seed" else "next1234567"),
         thumbnail=None, requested_by=1, requested_by_name="tester",
     )
 

@@ -33,11 +33,15 @@ async def start_keepalive_server() -> web.AppRunner | None:
             database = True
         except Exception:
             database = False
-        ready = connected and assistants and database
+        from bot.core.lease import lease
+        ready = connected and assistants and database and lease.valid()
         return web.json_response({'ready': ready, 'telegram': connected, 'assistants': assistants, 'database': database}, status=200 if ready else 503)
 
-    app = web.Application()
+    app = web.Application(client_max_size=16384)
+    from bot.web.server import attach
+    attach(app)
     app.router.add_get("/", health)
+    app.router.add_get("/health", health)
 
     runner = web.AppRunner(app)
     await runner.setup()

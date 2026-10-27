@@ -18,6 +18,11 @@ LIBRARY: /playlist list|save name|load name|delete name
 /gplaylist for shared group playlists · /playlist load favourites
 ADMIN: /settings · /dj add|remove user_id · /doctor
 FORCE: /playforce · /vplayforce (admins/DJs)
+COMMUNITY: /voteskip · /policy fair on|off · /policy votes 0..20
+DISCOVERY: /mood your mood · /identify (reply to a short clip; sends it to AudD)
+/lyrics artist song (provider link) · /importplaylist YouTube_playlist_URL
+SESSIONS: /schedule list|add dateTtime timezone group_playlist|cancel id
+/radio station (operator-configured YouTube streams) · /app
 OWNER: /addsudo · /delsudo · /stopall
 
 Queue positions start at 1 (current track). Requests default to admins/DJs.
@@ -27,6 +32,10 @@ Language: /settings language en|hi|hinglish (core player/onboarding messages).
 
 @Client.on_message(filters.command('start'))
 async def start_cmd(client, message):
+    if len(message.command) > 1 and message.command[1].startswith("app_"):
+        from bot.plugins.webapp import launch
+        await launch(client, message, message.command[1][4:])
+        return
     language = settings.default_lang
     if message.chat.type.value in ('group', 'supergroup'):
         language = (await preferences.get(message.chat.id))['language']

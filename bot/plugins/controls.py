@@ -9,15 +9,22 @@ from bot.core.queue import queues
 from bot.core.i18n import text
 
 
-async def action(chat_id, name):
+async def action(chat_id, name, *, expected_playback_id=None):
     if name == 'stop':
         result = await calls.stop(chat_id)
     elif name == 'skip':
-        result = await calls.skip(chat_id)
+        async with operation(chat_id):
+            if expected_playback_id is not None and queues.get(chat_id).playback_id != expected_playback_id:
+                raise ValueError('Track changed. Refresh the player.')
+            await calls._advance_and_play_unlocked(chat_id, force=True)
+            await calls.persist_queue(chat_id)
+            result = queues.get(chat_id).current
     elif name == 'resume':
-        result = await service.resume(chat_id)
+        result = await service.resume(chat_id, expected_playback_id=expected_playback_id)
     else:
         async with operation(chat_id):
+            if expected_playback_id is not None and queues.get(chat_id).playback_id != expected_playback_id:
+                raise ValueError('Track changed. Refresh the player.')
             result = await calls.pause(chat_id)
     await player.refresh(chat_id)
     return result

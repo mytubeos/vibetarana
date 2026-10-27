@@ -25,71 +25,71 @@ logger = get_logger(__name__)
 
 
 async def main() -> None:
-    tasks = []
-    # Downloads are cache files, not the durable library. A crashed previous
-    # single worker may have left them behind; restored Telegram IDs redownload.
+    from bot.core.lease import lease
+    from bot.core import scheduler
+    from bot.core.session import sessions
     from bot.core.media import ROOT
-    if ROOT.exists():
-        for pattern in ('*.media', '*.media.temp'):
-            for path in ROOT.glob(pattern):
-                path.unlink(missing_ok=True)
-    setup_cookies()
-    patch_ytdlp_timeout()
-
-    # Connect + prime the sudo cache before the bot starts dispatching
-    # messages, so admin_filter never wrongly rejects an early sudo command.
-    # Bind the (Render-only) keep-alive port before anything slower, so a
-    # Mongo/Telegram hiccup below shows up as a clear log line instead of a
-    # confusing "no open port detected" deploy timeout.
+    tasks = []
+    bot_started = False
+    pool_attempted = False
     keepalive_runner = await start_keepalive_server()
     try:
         await db.connect()
+        await lease.acquire()
+        tasks.append(asyncio.create_task(lease.renew_loop()))
+        # Only the lease owner may clean files or restore queues.
+        if ROOT.exists():
+            for pattern in ('*.media', '*.media.temp'):
+                for path in ROOT.glob(pattern):
+                    path.unlink(missing_ok=True)
+        setup_cookies()
+        patch_ytdlp_timeout()
         await restore_resolved_url_cache()
         await service.restore()
-        try:
-            await bot.start()
-            try:
-                me = await bot.get_me()
-                logger.info("Bot started as @%s", me.username)
-
-                await pool.start()
-                try:
-                    register_all_handlers()
-                    tasks = [asyncio.create_task(pool.health_check_loop()),
-                             asyncio.create_task(stale_assignment_check_loop()),
-                             asyncio.create_task(prewarm_popular_songs_loop()),
-                             asyncio.create_task(player.refresh_loop())]
-
-                    logger.info(
-                        "Ready — %d assistant(s) online, %d chat(s) each",
-                        len(pool.assistants),
-                        settings.max_vc_per_assistant,
-                    )
-                    from bot.core.alerts import notify
-                    await notify(f"Vibetarana ready: {len(pool.assistants)} assistants. Restored queues wait for /resume.", key="startup")
-                    await idle()
-                finally:
-                    logger.info("Shutting down...")
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    from bot.core.calls import _inflight, _prefetch_tasks
-                    pending = list(_inflight.values()) + list(_prefetch_tasks.values())
-                    for task in pending:
-                        task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
-                    await pool.stop()
-            finally:
-                await bot.stop()
-        finally:
-            # Nested try/finally so a failure at any stage (bad bot token, every
-            # assistant session invalid, idle() itself erroring) still cleanly
-            # releases whatever was already acquired, instead of leaving a
-            # dangling Pyrogram session or an idle Mongo connection open.
-            await db.disconnect()
+        lease.check()
+        await bot.start()
+        bot_started = True
+        pool_attempted = True
+        await pool.start()
+        lease.check()
+        register_all_handlers()
+        tasks.extend([asyncio.create_task(pool.health_check_loop()),
+                      asyncio.create_task(stale_assignment_check_loop()),
+                      asyncio.create_task(prewarm_popular_songs_loop()),
+                      asyncio.create_task(player.refresh_loop()),
+                      asyncio.create_task(scheduler.loop())])
+        from bot.core.alerts import notify
+        await notify(f"Vibetarana ready: {len(pool.assistants)} assistants. Restored queues wait for /resume.", key="startup")
+        idle_task = asyncio.create_task(idle())
+        lost_task = asyncio.create_task(lease.lost.wait())
+        tasks.extend([idle_task, lost_task])
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if lease.lost.is_set():
+            raise RuntimeError('Deployment lease lost; shutting down to avoid duplicate playback.')
+        if any(task is not idle_task for task in done):
+            raise RuntimeError('A background worker stopped unexpectedly; restarting safely.')
     finally:
-        if keepalive_runner is not None:
-            await keepalive_runner.cleanup()
+        logger.info('Shutting down...')
+        from bot.core.calls import _inflight, _prefetch_tasks
+        active = [s.task for s in sessions.values() if s.task and s.task is not asyncio.current_task()]
+        tasks.extend(active + list(_inflight.values()) + list(_prefetch_tasks.values()))
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            if pool_attempted:
+                await pool.stop()
+        finally:
+            try:
+                if bot_started:
+                    await bot.stop()
+            finally:
+                try:
+                    await lease.release()
+                finally:
+                    await db.disconnect()
+                    if keepalive_runner is not None:
+                        await keepalive_runner.cleanup()
 
 
 if __name__ == "__main__":

@@ -90,10 +90,20 @@ class AssistantPool:
 
     async def stop(self) -> None:
         for assistant in self.assistants:
+            # Stop native media pipelines before disconnecting MTProto.
+            for chat_id in list(assistant.chats):
+                try:
+                    async with asyncio.timeout(10):
+                        await assistant.call_py.leave_call(chat_id)
+                except Exception:
+                    logger.warning('Could not leave call %d during shutdown', chat_id)
             try:
                 await assistant.client.stop()
             except Exception:
                 logger.warning("Assistant %d did not stop cleanly", assistant.index, exc_info=True)
+
+        self.assistants.clear()
+        self._chat_assignment.clear()
 
     async def get_or_assign(self, chat_id: int) -> Assistant | None:
         """Return the assistant handling this chat. If none is assigned yet,

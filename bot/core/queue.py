@@ -1,7 +1,4 @@
-"""In-memory per-chat playback queue and state. Not persisted — losing this on
-restart is acceptable (deliberate; restart-persistence is a later phase). Only
-`chat_settings` (Mongo, see bot/core/db.py) holds deliberately-persisted config.
-"""
+"""In-memory playback state; service/calls persist queue snapshots to MongoDB."""
 from __future__ import annotations
 
 import json
@@ -45,6 +42,8 @@ class ChatPlaybackState:
     started_at: float | None = None
     elapsed: float = 0.0
     needs_resume: bool = False
+    playback_id: int = 0
+    skip_voters: set[int] = field(default_factory=set)
 
     @property
     def current(self) -> Track | None:
@@ -126,6 +125,26 @@ class QueueManager:
             autoplay=old.autoplay if old else False,
             history=list(old.history) if old else [],
         )
+
+    def fair(self, chat_id: int) -> None:
+        """Round robin upcoming requesters, preserving each requester's FIFO order."""
+        from collections import OrderedDict, deque
+        state = self.get(chat_id)
+        if not state.current:
+            return
+        buckets = OrderedDict()
+        for track in state.queue[1:]:
+            buckets.setdefault(track.requested_by, deque()).append(track)
+        users = deque(buckets)
+        if len(users) > 1 and users[0] == state.current.requested_by:
+            users.rotate(-1)
+        result = []
+        while users:
+            user = users.popleft()
+            result.append(buckets[user].popleft())
+            if buckets[user]:
+                users.append(user)
+        state.queue[1:] = result
 
     def remove(self, chat_id: int, position: int) -> Track:
         state = self.get(chat_id)

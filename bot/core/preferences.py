@@ -5,7 +5,8 @@ from bot.core.queue import queues
 from config import settings
 
 DEFAULTS = {'loop_mode': 'off', 'autoplay': False, 'play_mode': 'admins',
-            'language': settings.default_lang, 'dj_users': []}
+            'language': settings.default_lang, 'dj_users': [], 'fair_queue': False,
+            'vote_skip': 3, 'music_language': 'any', 'video_quality': '720'}
 _cache: dict[int, dict] = {}
 _locks: dict[int, asyncio.Lock] = {}
 

@@ -427,6 +427,9 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track, *, offse
     session = get_session(chat_id)
     revision = session.revision
     local_path = None
+    from bot.core.metrics import metrics
+    started = time.monotonic()
+    outcome = 'cancelled'
     try:
         validate_track(track)
         if youtube_id(track.link):
@@ -447,13 +450,21 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track, *, offse
             urls = (str(local_path), str(local_path))
             was_cached = False
         for attempt in range(2):
+            from bot.core.lease import lease
+            lease.check()
             if revision != session.revision:
                 return False
             video_url, audio_url = urls
             flags = f"-ss {offset} -t {max(1, settings.duration_limit_min * 60 - offset)}"
             if local_path:
                 flags += " -protocol_whitelist file,pipe -format_whitelist mov,mp3,wav,flac,ogg,matroska,webm,aac"
-            stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track), ffmpeg_parameters=flags)
+            from bot.core import preferences
+            pref = await preferences.get(chat_id)
+            quality = {'360': (640, 360, 24), '480': (854, 480, 24),
+                       '720': (1280, 720, 30), '1080': (1920, 1080, 30)}
+            params = VideoParameters(*quality.get(pref.get('video_quality'), quality['720']), adjust_by_height=False)
+            stream = MediaStream(video_url, audio_path=audio_url, video_flags=_video_flags(track),
+                                 video_parameters=params, ffmpeg_parameters=flags)
             try:
                 try:
                     await assistant.call_py.play(chat_id, stream)
@@ -484,6 +495,8 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track, *, offse
         state.needs_resume = False
         state.started_at = time.monotonic()
         state.elapsed = float(offset)
+        state.playback_id += 1
+        state.skip_voters.clear()
         schedule_prefetch(chat_id)
         video_id = youtube_id(track.link)
         if video_id:
@@ -494,15 +507,18 @@ async def _play_track(assistant: Assistant, chat_id: int, track: Track, *, offse
                 _audio_url_cache[video_id] = (urls, time.monotonic())
                 while len(_audio_url_cache) > _RESOLVED_URL_CACHE_MAX_ENTRIES:
                     _audio_url_cache.pop(next(iter(_audio_url_cache)))
+        outcome = 'success'
         return True
     except asyncio.CancelledError:
         raise
     except Exception:
+        outcome = 'failed'
         logger.warning("Playback failed in chat %d", chat_id, exc_info=True)
         from bot.core.alerts import notify
         asyncio.create_task(notify(f"Playback failed in group {chat_id}. Check server logs or /doctor.", key=f"play:{chat_id}"))
         return False
     finally:
+        metrics.record(outcome, time.monotonic() - started)
         if local_path:
             local_path.unlink(missing_ok=True)
 
@@ -517,7 +533,12 @@ async def _try_autoplay(chat_id: int) -> bool:
     assistant = _get_healthy_assistant(chat_id)
     if assistant is None:
         return False
-    related = await youtube.get_related(state.last_track.link)
+    from bot.core.recommendations import choose
+    try:
+        related = await choose(chat_id, state, youtube.get_related)
+    except Exception:
+        logger.warning('Recommendation unavailable', exc_info=True)
+        return False
     if related is None:
         return False
     # Re-check after the network round-trip above: a concurrent /stop (or

@@ -23,3 +23,42 @@ jobs:
         run: python -m compileall -q bot main.py config.py
       - name: Test without real credentials or services
         run: python -m pytest -q
+  mongo:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Verify real Mongo lease exclusion and schedule persistence
+        env:
+          VIBETARANA_MONGO_TEST_URI: mongodb://localhost:27017
+        run: python -m pytest tests/test_mongo_integration.py -q
+  mini-app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --prefix /tmp/vibetarana-ui playwright@1.51.1
+      - name: Browser smoke on installed Chrome
+        env:
+          PLAYWRIGHT_PACKAGE: /tmp/vibetarana-ui/node_modules/playwright
+          UI_SCREENSHOT_DIR: /tmp/ui-shots
+        run: |
+          mkdir -p /tmp/ui-shots
+          export CHROME_BIN="$(command -v google-chrome)"
+          node scripts/web_smoke.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mini-app-screenshots
+          path: /tmp/ui-shots

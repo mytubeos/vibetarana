@@ -22,9 +22,12 @@ def get_session(chat_id: int) -> Session:
 
 @asynccontextmanager
 async def operation(chat_id: int):
+    from bot.core.lease import lease
+    lease.check()
     session = get_session(chat_id)
     ticket = session.revision
     async with session.lock:
+        lease.check()
         if ticket != session.revision:
             raise asyncio.CancelledError
         previous = session.task

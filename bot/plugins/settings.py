@@ -15,7 +15,7 @@ async def settings_cmd(_, message):
     args = message.command[1:]
     if not args:
         p = await preferences.get(chat_id)
-        await message.reply_text(f"Request mode: {p['play_mode']}\nLanguage: {p['language']}\nDJs: {len(p['dj_users'])}\n/settings mode admins|members\n/settings language en|hi|hinglish\n/dj add user_id · /dj remove user_id", parse_mode=ParseMode.DISABLED)
+        await message.reply_text(f"Request mode: {p['play_mode']}\nLanguage: {p['language']}\nDJs: {len(p['dj_users'])}\nFair queue: {p['fair_queue']} · Vote threshold: {p['vote_skip']}\nMusic: {p['music_language']} · Video: {p['video_quality']}p\n/policy to change listening rules\n/settings mode admins|members\n/settings language en|hi|hinglish\n/dj add user_id · /dj remove user_id", parse_mode=ParseMode.DISABLED)
         return
     if len(args) != 2 or not ((args[0] == 'mode' and args[1] in ('admins', 'members')) or (args[0] == 'language' and args[1] in ('en', 'hi', 'hinglish'))):
         await message.reply_text('Usage: /settings mode admins|members or /settings language en|hi|hinglish')

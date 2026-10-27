@@ -3,9 +3,10 @@
 Telegram group voice-chat music bot using Kurigram, py-tgcalls, yt-dlp and MongoDB.
 
 See [the final blueprint](docs/BLUEPRINT.md) for release scope, architecture,
-acceptance tests and the planned community/Mini App roadmap.
+acceptance tests and release status. See [operations and feature setup](docs/OPERATIONS.md)
+for the expanded bot, Mini App, schedules and optional providers.
 
-## Included in R1
+## Included
 
 - Audio/video playback, force-play, play-next, pause, resume, seek and skip.
 - Cancellable group operations; stop invalidates pending playback requests.
@@ -18,8 +19,23 @@ acceptance tests and the planned community/Mini App roadmap.
 - Locked dependencies and offline regression CI.
 
 Spotify, Apple Music and SoundCloud track links use metadata lookup followed by a
-YouTube match; they are not separate audio backends. External playlist links,
-scheduled sessions, vote skip, advanced recommendations and Mini Apps are later phases.
+YouTube match; they are not separate audio backends.
+
+The expanded implementation also adds:
+
+- Fair requester queues, configurable unique-member vote skip and video output quality.
+- History/language-aware autoplay and bounded public YouTube playlist imports.
+- Persistent one-shot group-playlist schedules with explicit timezones and cancellation.
+- Operator-configured YouTube radio, with the same playback limits and controls.
+- Telegram-authenticated Mini App: queue, play, controls and saved playlist loading.
+- Owner dashboard with measured process metrics; exclusive deployment leases.
+- Docker promotion script with automatic rollback on failed startup readiness.
+- Optional AI mood search, short-clip AudD recognition and LRCLIB lyrics links.
+
+**Source implementation is not a live deployment.** Provider keys, HTTPS/BotFather
+setup and private-group acceptance are required to enable and validate integrations.
+One active worker is enforced; active/active sharding and production capacity
+measurements are not included. Premium service design is documented, not billing.
 
 ## Setup
 

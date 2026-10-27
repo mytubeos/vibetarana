@@ -13,7 +13,7 @@ async def enqueue(chat_id: int, tracks: list[Track], *, force=False, next_up=Fal
     async with operation(chat_id):
         if revision is not None and revision != get_session(chat_id).revision:
             raise asyncio.CancelledError
-        await preferences.get(chat_id)
+        pref = await preferences.get(chat_id)
         state = queues.get(chat_id)
         if not tracks:
             raise ValueError('No tracks found.')
@@ -29,6 +29,8 @@ async def enqueue(chat_id: int, tracks: list[Track], *, force=False, next_up=Fal
             state.queue[1:1] = tracks
         else:
             state.queue.extend(tracks)
+            if pref.get('fair_queue'):
+                queues.fair(chat_id)
         if was_idle or force:
             starter = state.current
             assistant, reason = await (calls.force_play(chat_id, starter) if force else calls.join_and_play(chat_id, starter))
@@ -56,9 +58,11 @@ async def enqueue(chat_id: int, tracks: list[Track], *, force=False, next_up=Fal
         return len(state.queue), was_idle or force
 
 
-async def resume(chat_id: int) -> bool:
+async def resume(chat_id: int, *, expected_playback_id=None) -> bool:
     async with operation(chat_id):
         state = queues.get(chat_id)
+        if expected_playback_id is not None and state.playback_id != expected_playback_id:
+            raise ValueError("Track changed. Refresh the player.")
         if state.current is None:
             return False
         if state.needs_resume or calls.pool.get_assigned(chat_id) is None:

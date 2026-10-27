@@ -1,14 +1,4 @@
-"""MongoDB wiring — actually used here, unlike TG where MONGO_URI was required
-but never connected. Owns four collections: `sudo_users` (a persisted
-allow-list beyond the single OWNER_ID env var), `chat_settings` (a minimal
-per-chat scaffold, write-through only in Phase 1 — nothing reads it back yet;
-bot/core/queue.py stays pure in-memory until restart-persistence lands in a
-later phase), and `resolved_url_cache` + `play_counts` (added 2026-08-04 —
-bot/core/calls.py's cross-restart cache-warming; see its own docstrings).
-
-AsyncMongoClient (not motor — deprecated) must be constructed inside a running
-event loop, so `connect()` is called from main.py, not at import time.
-"""
+"""MongoDB persistence for settings, libraries, recovery, scheduled jobs and leases."""
 from __future__ import annotations
 
 from pymongo import AsyncMongoClient
@@ -30,6 +20,8 @@ async def connect() -> None:
     await db.command("ping")
     await _refresh_sudo_cache()
     await db.playlists.create_index([("scope", 1), ("name", 1)], unique=True)
+    await db.scheduled_sessions.create_index([("status", 1), ("due", 1)])
+    await db.scheduled_sessions.create_index("created_at", expireAfterSeconds=60 * 60 * 24 * 60)
     logger.info("Connected to MongoDB (%d sudo user(s) cached)", len(_sudo_cache))
 
 
